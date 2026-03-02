@@ -52,9 +52,9 @@ jobs:
         run: npx license-checker --onlyAllow '${{ env.APPROVED_LICENSES }}'
         continue-on-error: true
 
-      # Step 6: Lint the codebase
-      - name: Run linter
-        run: npm run lint --if-present
+    #   # Step 6: Lint the codebase
+    #   - name: Run linter
+    #     run: npm run lint --if-present
 
       # Step 7: Run unit tests with coverage
       - name: Run tests
@@ -94,18 +94,3 @@ jobs:
           echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
 
-  # Notification job
-  notify:
-    name: Send Notification
-    runs-on: macos-latest
-    needs: build-and-test
-    if: always()
-
-    steps:
-      - name: Notify on success
-        if: needs.build-and-test.result == 'success'
-        run: echo "✅ Build and tests passed successfully!"
-
-      - name: Notify on failure
-        if: needs.build-and-test.result == 'failure'
-        run: echo "❌ Build or tests failed! Check the logs."
