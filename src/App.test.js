@@ -5,6 +5,6 @@ import App from './App';
 
 test('renders welcome message', () => {
   render(<App />);
-  const heading = screen.getByText(/MBB Mobile App/i);
+  const heading = screen.getByRole('heading', { name: /MBB Mobile App/i });
   expect(heading).toBeInTheDocument();
 });
