@@ -20,7 +20,9 @@ export const formatDate = (date) => {
  * Mask account number (show last 4 digits)
  */
 export const maskAccountNumber = (accountNumber) => {
-  if (!accountNumber || accountNumber.length < 4) return accountNumber;
+  if (!accountNumber || accountNumber.length < 4) {
+    return accountNumber;
+  }
   const last4 = accountNumber.slice(-4);
   const masked = '*'.repeat(accountNumber.length - 4);
   return `${masked}${last4}`;
