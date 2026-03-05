@@ -4,5 +4,6 @@ module.exports = {
   rules: {
     'no-console': 'warn',
     'react-native/no-inline-styles': 'off',
+    'prettier/prettier': 'off',
   },
 };

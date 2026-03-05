@@ -1,4 +1,4 @@
-import { API_URLS, ENVIRONMENTS } from '../constants/appConstants';
+import { API_URLS } from '../constants/appConstants';
 import { getConfig } from '../config/appConfig';
 
 const config = getConfig();
