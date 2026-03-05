@@ -1,12 +1,18 @@
 import React from 'react';
+import { SafeAreaView, StatusBar } from 'react-native';
+import { Provider } from 'react-redux';
+import { store } from './redux/store';
+import AppNavigator from './navigators/AppNavigator';
 
-function App() {
+const App = () => {
   return (
-    <div className="App">
-      <h1>MBB Mobile App</h1>
-      <p>Welcome to the MBB Mobile Application.</p>
-    </div>
+    <Provider store={store}>
+      <SafeAreaView style={{ flex: 1 }}>
+        <StatusBar barStyle="dark-content" />
+        <AppNavigator />
+      </SafeAreaView>
+    </Provider>
   );
-}
+};
 
 export default App;

@@ -1,0 +1,506 @@
+# =============================================================================
+# MBB Mobile App - Android CI Workflow (React Native)
+# =============================================================================
+# This workflow builds the Android RegionalApp using React Native.
+# It requires Node.js (for RN JS bundle) + JDK 17 + Gradle.
+# Trigger: workflow_dispatch (manual) with environment selection.
+#
+# Job Flow:
+#   Job 1: Install  →  Job 2: Scan   ──→  Job 4: Build Android
+#                   →  Job 3: Test   ──┘
+# =============================================================================
+
+name: Android CI - RegionalApp
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - SIT
+          - Staging
+          - Production
+        default: 'SIT'
+
+# ---------------------------------------------------------------------------
+# Environment variables
+# ---------------------------------------------------------------------------
+env:
+  NODE_VERSION: '20'
+  JAVA_VERSION: '17'
+  ANDROID_BUILD_TOOLS_VERSION: '34.0.0'
+  ANDROID_PLATFORM_VERSION: '34'
+  NDK_VERSION: '25.2.9519653'
+
+# ---------------------------------------------------------------------------
+# Concurrency - cancel in-progress runs for the same branch/environment
+# ---------------------------------------------------------------------------
+concurrency:
+  group: android-ci-${{ github.ref }}-${{ github.event.inputs.environment }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Job 1: Install - Setup environment and install dependencies
+  # ===========================================================================
+  install:
+    name: Install Dependencies
+    runs-on: macos-latest
+    timeout-minutes: 15
+    outputs:
+      APP_VERSION_NAME: ${{ steps.app_version.outputs.APP_VERSION_NAME }}
+      APP_VERSION_CODE: ${{ steps.app_version.outputs.APP_VERSION_CODE }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Setup Node.js
+      # -----------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      # -----------------------------------------------------------------------
+      # Step 3: Install npm dependencies
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: npm install
+
+      # -----------------------------------------------------------------------
+      # Step 4: Cache node_modules for downstream jobs
+      # -----------------------------------------------------------------------
+      - name: Cache node_modules
+        uses: actions/cache/save@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # -----------------------------------------------------------------------
+      # Step 5: Check app version
+      # -----------------------------------------------------------------------
+      - name: Check app version
+        id: app_version
+        run: |
+          # Extract versionName from build.gradle
+          APP_VERSION_NAME=$(grep -oP 'versionName\s+"\K[^"]+' android/app/build.gradle || echo "1.0.0")
+
+          # Extract versionCode from build.gradle
+          APP_VERSION_CODE=$(grep -oP 'versionCode\s+\K\d+' android/app/build.gradle || echo "1")
+
+          echo "APP_VERSION_NAME=$APP_VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "APP_VERSION_CODE=$APP_VERSION_CODE" >> $GITHUB_OUTPUT
+
+          echo "📱 App Version: $APP_VERSION_NAME ($APP_VERSION_CODE)"
+
+      # -----------------------------------------------------------------------
+      # Step 6: Job summary
+      # -----------------------------------------------------------------------
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 📦 Install Job Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Node.js** | ${{ env.NODE_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **App Version** | ${{ steps.app_version.outputs.APP_VERSION_NAME }} (${{ steps.app_version.outputs.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **npm cache key** | node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Job 2: Scan - Security audit and Lint
+  # ===========================================================================
+  scan:
+    name: Security Audit & Lint
+    runs-on: macos-latest
+    needs: install
+    timeout-minutes: 15
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Setup Node.js
+      # -----------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # Step 3: Restore node_modules cache
+      # -----------------------------------------------------------------------
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # -----------------------------------------------------------------------
+      # Step 4: Setup Java
+      # -----------------------------------------------------------------------
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # Step 5: Make Gradle executable
+      # -----------------------------------------------------------------------
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      # -----------------------------------------------------------------------
+      # Step 6: Security scan (npm audit)
+      # -----------------------------------------------------------------------
+      - name: Security audit
+        run: npm audit --audit-level=moderate || true
+        continue-on-error: true
+
+      # -----------------------------------------------------------------------
+      # Step 7: Security scan (OWASP)
+      # -----------------------------------------------------------------------
+      - name: Security scan (OWASP)
+        run: |
+          cd android
+          ./gradlew dependencyCheckAnalyze || true
+        continue-on-error: true
+
+      # -----------------------------------------------------------------------
+      # Step 8: Lint check (Gradle)
+      # -----------------------------------------------------------------------
+      - name: Lint check
+        run: |
+          cd android
+          ./gradlew lint
+
+      # -----------------------------------------------------------------------
+      # Step 9: Lint check (ESLint)
+      # -----------------------------------------------------------------------
+      - name: ESLint
+        run: npm run lint
+
+      # -----------------------------------------------------------------------
+      # Step 10: Job summary
+      # -----------------------------------------------------------------------
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 🔍 Scan Job Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ npm security audit completed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ OWASP dependency check completed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Gradle lint check completed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ ESLint check completed" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Job 3: Test - Jest unit tests and Gradle tests
+  # ===========================================================================
+  test:
+    name: Unit & Jest Tests
+    runs-on: macos-latest
+    needs: install
+    timeout-minutes: 30
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Setup Node.js
+      # -----------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # Step 3: Restore node_modules cache
+      # -----------------------------------------------------------------------
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # -----------------------------------------------------------------------
+      # Step 4: Run Jest unit tests
+      # -----------------------------------------------------------------------
+      - name: Run Jest unit tests
+        run: npm test
+
+      # -----------------------------------------------------------------------
+      # Step 5: Setup Java
+      # -----------------------------------------------------------------------
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # Step 6: Make Gradle executable
+      # -----------------------------------------------------------------------
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      # -----------------------------------------------------------------------
+      # Step 7: Run Android unit tests (Gradle)
+      # -----------------------------------------------------------------------
+      - name: Run Android unit tests
+        run: |
+          cd android
+          ./gradlew test
+
+      # -----------------------------------------------------------------------
+      # Step 8: Job summary
+      # -----------------------------------------------------------------------
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 🧪 Test Job Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Jest unit tests completed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Android Gradle unit tests completed" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Job 4: Build Android - Build, sign, and upload artifacts
+  # ===========================================================================
+  build:
+    name: Build Android (${{ github.event.inputs.environment }})
+    runs-on: macos-latest
+    needs: [scan, test]
+    timeout-minutes: 60
+    env:
+      APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}
+      APP_VERSION_CODE: ${{ needs.install.outputs.APP_VERSION_CODE }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Setup Node.js
+      # -----------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # Step 3: Restore node_modules cache
+      # -----------------------------------------------------------------------
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # -----------------------------------------------------------------------
+      # Step 4: Setup Java
+      # -----------------------------------------------------------------------
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # Step 5: Cache Gradle dependencies
+      # -----------------------------------------------------------------------
+      - name: Cache Gradle
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # -----------------------------------------------------------------------
+      # Step 6: Create local.properties
+      # -----------------------------------------------------------------------
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          echo "✅ local.properties created: sdk.dir=$ANDROID_SDK_ROOT"
+
+      # -----------------------------------------------------------------------
+      # Step 7: Create google-services.json from base64
+      # -----------------------------------------------------------------------
+      - name: Create google-services.json from base64
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
+          echo "✅ google-services.json decoded successfully"
+
+      # -----------------------------------------------------------------------
+      # Step 8: Verify google-services.json exists
+      # -----------------------------------------------------------------------
+      - name: Verify google-services.json exists
+        run: |
+          if [ ! -f android/app/google-services.json ]; then
+            echo "❌ google-services.json not found!"
+            exit 1
+          fi
+          echo "✅ google-services.json verified"
+
+      # -----------------------------------------------------------------------
+      # Step 9: Create Android keystore from base64
+      # -----------------------------------------------------------------------
+      - name: Create Android keystore from base64
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.jks
+          echo "✅ Android keystore decoded successfully"
+
+      # -----------------------------------------------------------------------
+      # Step 10: Verify Android keystore exists
+      # -----------------------------------------------------------------------
+      - name: Verify Android keystore exists
+        run: |
+          if [ ! -f android/app/release.jks ]; then
+            echo "❌ Android keystore not found!"
+            exit 1
+          fi
+          echo "✅ Android keystore verified"
+
+      # -----------------------------------------------------------------------
+      # Step 11: Install Android SDK components
+      # -----------------------------------------------------------------------
+      - name: Install Android SDK components
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-${{ env.ANDROID_PLATFORM_VERSION }}" \
+            "build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }}" \
+            "ndk;${{ env.NDK_VERSION }}" \
+            --sdk_root=$ANDROID_SDK_ROOT
+
+          echo "✅ Android SDK components installed"
+
+      # -----------------------------------------------------------------------
+      # Step 12: Verify NDK source.properties
+      # -----------------------------------------------------------------------
+      - name: Verify NDK source.properties
+        run: |
+          NDK_PATH="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"
+          if [ ! -f "$NDK_PATH/source.properties" ]; then
+            echo "❌ NDK source.properties not found at $NDK_PATH"
+            exit 1
+          fi
+          cat "$NDK_PATH/source.properties"
+          echo "✅ NDK verified"
+
+      # -----------------------------------------------------------------------
+      # Step 13: Make Gradle executable
+      # -----------------------------------------------------------------------
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      # -----------------------------------------------------------------------
+      # Step 14: Build AAB (Production only)
+      # -----------------------------------------------------------------------
+      - name: Build Android AAB (${{ github.event.inputs.environment }})
+        if: github.event.inputs.environment == 'Production'
+        run: |
+          cd android
+          ./gradlew bundleRelease \
+            -PMYAPP_UPLOAD_STORE_FILE=release.jks \
+            -PMYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+            -PMYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }} \
+            -PMYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+
+          echo "✅ AAB build complete"
+
+      # -----------------------------------------------------------------------
+      # Step 15: Upload AAB artifact
+      # -----------------------------------------------------------------------
+      - name: Upload Android AAB artifact
+        if: github.event.inputs.environment == 'Production'
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-${{ github.event.inputs.environment }}-aab-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          path: android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+
+      # -----------------------------------------------------------------------
+      # Step 16: Build APK
+      # -----------------------------------------------------------------------
+      - name: Build Android APK (${{ github.event.inputs.environment }})
+        run: |
+          cd android
+          ENV="${{ github.event.inputs.environment }}"
+
+          if [ "$ENV" = "SIT" ]; then
+            ./gradlew assembleDebug
+          else
+            ./gradlew assembleRelease \
+              -PMYAPP_UPLOAD_STORE_FILE=release.jks \
+              -PMYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+              -PMYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }} \
+              -PMYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+          fi
+
+          echo "✅ APK build complete"
+
+      # -----------------------------------------------------------------------
+      # Step 17: Upload APK artifact
+      # -----------------------------------------------------------------------
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-${{ github.event.inputs.environment }}-apk-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # -----------------------------------------------------------------------
+      # Step 18: Job summary
+      # -----------------------------------------------------------------------
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 🤖 Android CI Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **App** | RegionalApp (Android) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ github.event.inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Runner** | ${{ runner.os }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Node.js** | ${{ env.NODE_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **JDK** | ${{ env.JAVA_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered by** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+
+      # -----------------------------------------------------------------------
+      # Cleanup: Remove keystore and firebase config
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f android/app/release.jks
+          rm -f android/app/google-services.json

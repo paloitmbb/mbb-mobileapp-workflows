@@ -10,6 +10,9 @@ coverage/
 # Environment variables
 .env
 .env.local
+.env.development
+.env.staging
+.env.production
 .env.development.local
 .env.test.local
 .env.production.local
@@ -17,16 +20,49 @@ coverage/
 # OS files
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
 
 # IDE
 .vscode/
 .idea/
+*.iml
 
 # Debug logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# React Native
+.metro-health-check*
+*.jsbundle
+*.bundle
+
+# iOS
+ios/Pods/
+ios/build/
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+ios/DerivedData/
+*.hmap
+*.ipa
+*.xcarchive
+*.dSYM.zip
+*.dSYM
+
+# Android
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/app/google-services.json
+android/app/release.jks
+*.apk
+*.aab
+*.keystore
+!android/app/debug.keystore
+
 # Misc
 *.tgz
 .cache/
+tmp/
