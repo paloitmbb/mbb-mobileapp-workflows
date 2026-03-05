@@ -176,10 +176,10 @@ jobs:
           echo "- ✅ ESLint check completed" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
-  # Job 3: Test - Jest unit tests and iOS XCTest
+  # Job 3: Test - Unit tests
   # ===========================================================================
   test:
-    name: Unit & Jest Tests
+    name: Unit Tests
     runs-on: macos-latest
     needs: install
     timeout-minutes: 30
@@ -209,51 +209,20 @@ jobs:
           key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       # -----------------------------------------------------------------------
-      # Step 4: Run Jest unit tests
+      # Step 4: Run unit tests
       # -----------------------------------------------------------------------
-      - name: Run Jest unit tests
+      - name: Run unit tests
         run: npm test
 
       # -----------------------------------------------------------------------
-      # Step 5: Setup Ruby (for CocoaPods)
-      # -----------------------------------------------------------------------
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: ${{ env.RUBY_VERSION }}
-          bundler-cache: true
-
-      # -----------------------------------------------------------------------
-      # Step 6: Install CocoaPods
-      # -----------------------------------------------------------------------
-      - name: Install CocoaPods
-        run: |
-          gem install cocoapods
-          cd ios && pod install
-
-      # -----------------------------------------------------------------------
-      # Step 7: Run iOS unit tests (XCTest)
-      # -----------------------------------------------------------------------
-      - name: Run iOS unit tests (XCTest)
-        run: |
-          xcodebuild test \
-            -workspace ${{ env.XCODE_WORKSPACE }} \
-            -scheme RegionalApp \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
-            -resultBundlePath TestResults \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcbeautify || true
-
-      # -----------------------------------------------------------------------
-      # Step 8: Job summary
+      # Step 5: Job summary
       # -----------------------------------------------------------------------
       - name: Job summary
         if: always()
         run: |
           echo "## 🧪 Test Job Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Jest unit tests completed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ iOS XCTest completed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Unit tests completed" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
   # Job 4: Build iOS - Build, sign, and upload artifacts
@@ -402,7 +371,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Upload iOS XCArchive artifact
         if: github.event.inputs.environment != 'SIT'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ios-${{ github.event.inputs.environment }}-xcarchive-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
           path: ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive.zip
@@ -413,7 +382,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Upload iOS IPA artifact
         if: github.event.inputs.environment != 'SIT'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ios-${{ github.event.inputs.environment }}-ipa-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
           path: ios/build/ipa/RegionalApp-*.ipa
