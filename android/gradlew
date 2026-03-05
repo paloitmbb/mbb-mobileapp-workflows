@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Gradle wrapper stub for CI
+echo "Gradle wrapper - use ./gradlew from the android/ directory"

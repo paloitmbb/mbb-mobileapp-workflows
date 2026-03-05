@@ -1,4 +1,4 @@
-name: macOS CI - React JS
+name: macOS CI - iOS Node.js Build
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ env:
 
 jobs:
   build-and-test:
-    name: Build & Test React App (Node ${{ matrix.node-version }})
+    name: Build & Test iOS App (Node ${{ matrix.node-version }})
     runs-on: macos-latest
 
     strategy:
@@ -58,19 +58,22 @@ jobs:
 
       # Step 7: Run unit tests with coverage
       - name: Run tests
-        run: npm test -- --ci --coverage --watchAll=false
+        run: npm test
 
       # Step 8: Build the application
       - name: Build application
         run: npm run build
 
-      # Step 9: Upload build artifacts
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-output-node-${{ matrix.node-version }}
-          path: ${{ env.BUILD_PATH }}
-          retention-days: ${{ env.RETENTION_DAYS }}
+      # Step 9: Publish to GitHub Packages
+      - name: Configure npm for GitHub Packages
+        run: |
+          echo "@paloitmbb:registry=https://npm.pkg.github.com" >> .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" >> .npmrc
+
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Step 10: Upload test coverage report
       - name: Upload coverage report
