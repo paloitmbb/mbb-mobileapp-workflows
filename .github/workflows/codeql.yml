@@ -1,41 +1,129 @@
-name: CodeQL Security Analysis
+# =============================================================================
+# CodeQL Analysis — {{REPO_NAME}} (React Native)
+# =============================================================================
+# SAST via GitHub CodeQL — runs on every PR, every push to main/develop,
+# and on a weekly schedule. Results surface in:
+#   GitHub → Security → Code scanning
+#
+# Language: javascript-typescript  (covers .js, .mjs, .cjs, .ts, .tsx, .jsx)
+# Coverage: security-extended queries  →  OWASP Top 10 + CWE beyond defaults
+#           security-and-quality queries  →  maintainability + reliability
+#
+# Note: JavaScript/TypeScript are interpreted — no build step is required.
+#       CodeQL analyses the source directly.
+# =============================================================================
+
+name: CodeQL Analysis
 
 on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  schedule:
+    # Randomised offset avoids peak load on GitHub's SARIF ingestion service.
+    - cron: "43 6 * * 1" # Weekly — Monday 06:43 UTC
   workflow_dispatch:
 
+# Global read-only default. Jobs escalate only what they need.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  codeql-analysis:
-    name: CodeQL Security Analysis
-    runs-on: macos-latest
+  # ---------------------------------------------------------------------------
+  # Job 1 — CodeQL SAST
+  # ---------------------------------------------------------------------------
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
 
     permissions:
-      actions: read
       contents: read
-      security-events: write
+      security-events: write # upload SARIF to Security tab
+      actions: read # required by CodeQL on private repos
 
     strategy:
-      fail-fast: false
+      fail-fast: false # keep analyzing remaining languages if one fails
       matrix:
-        language: ['javascript-typescript']
+        language:
+          - javascript-typescript
 
     steps:
-      # Step 1: Checkout source code
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Step 2: Initialize CodeQL
+      # Initialize CodeQL database and inject security query suites.
+      # No explicit build step needed for JavaScript / TypeScript —
+      # CodeQL performs its own extraction pass over the source files.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v3.32.5
         with:
           languages: ${{ matrix.language }}
-          queries: security-and-quality
+          # security-extended — XSS, injection, prototype pollution, SSRF,
+          #                     path traversal, insecure randomness, and more.
+          # security-and-quality — adds code health: dead code, unused vars.
+          queries: security-extended,security-and-quality
 
-      # Step 3: Autobuild
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
-
-      # Step 4: Perform CodeQL Analysis
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v3.32.5
         with:
           category: "/language:${{ matrix.language }}"
+          # Emit SARIF locally so the artifact step below can capture it.
+          output: sarif-results
+          upload: true
+
+      # Archive SARIF for local debugging without visiting the Security tab.
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v4
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — Dependency Review  (pull_request events only)
+  # ---------------------------------------------------------------------------
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write # post summary comment on the PR
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4
+        with:
+          # Block PRs that introduce HIGH or CRITICAL CVEs.
+          fail-on-severity: high
+          # Always post a summary table to the PR for visibility.
+          comment-summary-in-pr: always
+          warn-only: false
+
+  # ---------------------------------------------------------------------------
+  # Job 3 — Secret Scanning (TruffleHog)
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog secret scan
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          extra_args: --only-verified

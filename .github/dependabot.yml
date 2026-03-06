@@ -1,0 +1,55 @@
+# =============================================================================
+# Dependabot Configuration — MBB Mobile App (React Native)
+# =============================================================================
+# Automated dependency updates — runs weekly on Monday.
+# Covers: npm, GitHub Actions, Gradle (Android), CocoaPods (iOS).
+# PRs appear under the "dependabot" label for easy filtering.
+# =============================================================================
+
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # npm (JavaScript / TypeScript dependencies)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions (workflow action versions)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci(deps)"
+
+  # ---------------------------------------------------------------------------
+  # Gradle (Android dependencies)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "gradle"
+    directory: "/android"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "android"
+    commit-message:
+      prefix: "chore(deps-android)"

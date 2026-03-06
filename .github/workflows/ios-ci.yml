@@ -6,13 +6,18 @@
 # Trigger: workflow_dispatch (manual) with environment selection.
 #
 # Job Flow:
-#   Job 1: Install  →  Job 2: Scan   ──→  Job 4: Build iOS
-#                   →  Job 3: Test   ──┘
+#   Job 1: Install  →  Job 2: Scan           ──→  Job 6: Build iOS
+#                   →  Job 3: Test           ──┘
+#                      Job 4: CodeQL         ──┘
+#                      Job 5: Secret Scan    ──┘
 # =============================================================================
 
 name: iOS CI - RegionalApp
 
 on:
+
+  pull_request:
+    branches: [main, sit]
   workflow_dispatch:
     inputs:
       environment:
@@ -225,12 +230,85 @@ jobs:
           echo "- ✅ Unit tests completed" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
-  # Job 4: Build iOS - Build, sign, and upload artifacts
+  # Job 4: CodeQL - Static Application Security Testing (SAST)
+  # ===========================================================================
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Initialize CodeQL
+      # -----------------------------------------------------------------------
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended,security-and-quality
+
+      # -----------------------------------------------------------------------
+      # Step 3: Perform CodeQL Analysis
+      # -----------------------------------------------------------------------
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
+
+  # ===========================================================================
+  # Job 5: Secret Scanning
+  # ===========================================================================
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository (full history for deep scan)
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # Step 2: Run TruffleHog secret scan
+      # -----------------------------------------------------------------------
+      - name: TruffleHog secret scan
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          extra_args: --only-verified
+
+      # -----------------------------------------------------------------------
+      # Step 3: Job summary
+      # -----------------------------------------------------------------------
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 🔑 Secret Scanning Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ TruffleHog secret scan completed" >> $GITHUB_STEP_SUMMARY
+          echo "- Scanned full git history for verified secrets" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Job 6: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
     name: Build iOS (${{ github.event.inputs.environment }})
     runs-on: macos-latest
-    needs: [scan, test]
+    needs: [scan, test, codeql, secret-scan]
     timeout-minutes: 60
     env:
       APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}

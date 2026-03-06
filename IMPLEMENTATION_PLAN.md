@@ -189,7 +189,8 @@ Checkout → Setup Node.js → Install npm packages → Setup Java (JDK 17)
 
 | Component | Applies To | Purpose |
 |-----------|-----------|---------|
-| CodeQL analysis | iOS + Android | Static code security scanning |
+| CodeQL analysis | iOS + Android | Static code security scanning (integrated into both CI workflows) |
+| Dependabot | npm + GitHub Actions + Gradle | Weekly automated dependency update PRs |
 | Notifications | iOS + Android | Slack/Teams alerts on CI results |
 | Branch protection | All | Require CI pass before merge |
 
@@ -200,10 +201,11 @@ Checkout → Setup Node.js → Install npm packages → Setup Java (JDK 17)
 ```
 mbb-mobileapp-workflows/
 ├── .github/
+│   ├── dependabot.yml                    # Dependabot weekly dependency updates
 │   ├── workflows/
-│   │   ├── ios-ci.yml                    # iOS React Native CI pipeline
-│   │   ├── android-ci.yml               # Android React Native CI pipeline
-│   │   └── codeql.yml                   # CodeQL security scanning
+│   │   ├── ios-ci.yml                    # iOS React Native CI pipeline (includes CodeQL job)
+│   │   ├── android-ci.yml               # Android React Native CI pipeline (includes CodeQL job)
+│   │   └── codeql.yml                   # Standalone CodeQL security scanning (PR/push/schedule)
 │
 ├── ios/                                  # iOS React Native project
 │   ├── RegionalApp.xcodeproj/
@@ -240,6 +242,10 @@ mbb-mobileapp-workflows/
 ### iOS CI Pipeline
 
 ```
+Job 1: Install  →  Job 2: Scan    ──→  Job 5: Build iOS
+                →  Job 3: Test    ──┘
+                   Job 4: CodeQL  ──┘
+
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
 │   Checkout   │────▶│  Setup Node  │────▶│  npm install │────▶│  pod install │
 │   Source     │     │  + Ruby      │     │              │     │  (CocoaPods) │
@@ -248,8 +254,8 @@ mbb-mobileapp-workflows/
         ┌────────────────────────────────────────────────────────────┘
         ▼
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
-│   Security  │────▶│    Lint +    │────▶│  Jest Tests  │────▶│  XCTest      │
-│   Audit     │     │   License    │     │  (JS/TS)     │     │  (iOS)       │
+│   Security  │────▶│    Lint +    │────▶│  Jest Tests  │────▶│  CodeQL SAST │
+│   Audit     │     │   License    │     │  (JS/TS)     │     │  (parallel)  │
 └─────────────┘     └──────────────┘     └─────────────┘     └──────┬───────┘
                                                                      │
         ┌────────────────────────────────────────────────────────────┘
@@ -263,6 +269,10 @@ mbb-mobileapp-workflows/
 ### Android CI Pipeline
 
 ```
+Job 1: Install  →  Job 2: Scan    ──→  Job 5: Build Android
+                →  Job 3: Test    ──┘
+                   Job 4: CodeQL  ──┘
+
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
 │   Checkout   │────▶│  Setup Node  │────▶│  npm install │────▶│  Setup JDK   │
 │   Source     │     │  (for RN)    │     │  (shared)    │     │    17        │
@@ -292,8 +302,8 @@ mbb-mobileapp-workflows/
         ┌────────────────────────────────────────────────────────────┘
         ▼
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
-│  Build AAB  │────▶│ Upload AAB   │────▶│  Build APK   │────▶│ Upload APK   │
-│ (Production)│     │  Artifact    │     │ (Production) │     │  Artifact    │
+│ CodeQL SAST │────▶│  Build AAB   │────▶│  Build APK   │────▶│ Upload APK   │
+│ (parallel)  │     │ (Production) │     │ (All envs)   │     │  Artifact    │
 └─────────────┘     └──────────────┘     └─────────────┘     └──────────────┘
 ```
 
@@ -307,6 +317,8 @@ mbb-mobileapp-workflows/
 | **Jailbreak Detection** | `EnhancedJailbreakDetection.h/.mm` | Root detection (Play Integrity) |
 | **Dependency Scanning** | `npm audit` (shared) | `npm audit` (shared) + OWASP Dependency Check |
 | **Static Analysis** | CodeQL + ESLint | CodeQL + ESLint (shared JS) + Android Lint |
+| **SAST in CI** | CodeQL job (Job 4) gates iOS build | CodeQL job (Job 4) gates Android build |
+| **Dependency Updates** | Dependabot weekly (npm, GitHub Actions) | Dependabot weekly (npm, GitHub Actions, Gradle) |
 | **License Compliance** | `license-checker` (shared) | `license-checker` (shared) + Gradle license plugin |
 | **Firebase Config** | N/A | `google-services.json` from encrypted secret |
 | **Secrets Management** | GitHub Encrypted Secrets | GitHub Encrypted Secrets |
@@ -361,7 +373,10 @@ mbb-mobileapp-workflows/
 - [ ] Generate job summary
 
 ### Shared CI Components
-- [ ] CodeQL security scanning workflow
+- [x] CodeQL security scanning workflow (standalone `codeql.yml`)
+- [x] CodeQL SAST job integrated into `android-ci.yml` (Job 4 — gates build)
+- [x] CodeQL SAST job integrated into `ios-ci.yml` (Job 4 — gates build)
+- [x] Dependabot weekly updates (`dependabot.yml` — npm, GitHub Actions, Gradle)
 - [ ] Notification setup (Slack/Teams webhooks)
 - [ ] Branch protection rules (require CI pass)
 - [ ] Documentation & README update
