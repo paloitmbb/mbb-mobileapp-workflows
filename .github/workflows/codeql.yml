@@ -12,7 +12,7 @@
 # Note: JavaScript/TypeScript are interpreted — no build step is required.
 #       CodeQL analyses the source directly.
 # =============================================================================
-
+#dummy comment to trigger workflow run
 name: CodeQL Analysis
 
 on:
