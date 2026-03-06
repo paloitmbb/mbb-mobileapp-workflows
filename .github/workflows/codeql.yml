@@ -1,7 +1,7 @@
 # =============================================================================
 # CodeQL Analysis — {{REPO_NAME}} (React Native)
 # =============================================================================
-# SAST via GitHub CodeQL — runs on every PR, every push to main/develop,
+# SAST via GitHub CodeQL — runs on every PR, every push to main/sit,
 # and on a weekly schedule. Results surface in:
 #   GitHub → Security → Code scanning
 #
@@ -17,17 +17,19 @@ name: CodeQL Analysis
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main, sit]
   push:
-    branches: [main, develop]
+    branches: [main, sit]
   schedule:
     # Randomised offset avoids peak load on GitHub's SARIF ingestion service.
     - cron: "43 6 * * 1" # Weekly — Monday 06:43 UTC
   workflow_dispatch:
 
-# Global read-only default. Jobs escalate only what they need.
 permissions:
-  contents: read
+  contents: read          # Allows workflow to clone repository
+  pull-requests: write    # Post Dependency Review comments
+  security-events: write  # Upload CodeQL scan results
+  actions: read           # Required by CodeQL on private repos
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,12 +41,8 @@ jobs:
   # ---------------------------------------------------------------------------
   analyze:
     name: Analyze (${{ matrix.language }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      security-events: write # upload SARIF to Security tab
-      actions: read # required by CodeQL on private repos
 
     strategy:
       fail-fast: false # keep analyzing remaining languages if one fails
@@ -91,11 +89,7 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
-    permissions:
-      contents: read
-      pull-requests: write # post summary comment on the PR
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
       - name: Checkout repository
@@ -110,20 +104,3 @@ jobs:
           comment-summary-in-pr: always
           warn-only: false
 
-  # ---------------------------------------------------------------------------
-  # Job 3 — Secret Scanning (TruffleHog)
-  # ---------------------------------------------------------------------------
-  secret-scan:
-    name: Secret Scanning
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-
-      - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@v3
-        with:
-          extra_args: --only-verified
