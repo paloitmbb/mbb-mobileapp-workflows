@@ -18,6 +18,12 @@ name: iOS CI - RegionalApp
 on:
   pull_request:
     branches: [main, sit]
+    paths:
+      - 'ios/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/ios-ci.yml'
   workflow_dispatch:
     inputs:
       environment:
@@ -203,7 +209,7 @@ jobs:
   # Job 4: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build iOS (${{ env.ENVIRONMENT }})
+    name: Build iOS (${{ github.event.inputs.environment || 'SIT' }})
     runs-on: macos-latest
     needs: [install, scan, test]
     timeout-minutes: 60
