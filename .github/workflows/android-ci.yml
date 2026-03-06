@@ -15,8 +15,7 @@
 name: Android CI - RegionalApp
 
 on:
-  push:
-    branches: [main, sit]
+  
   pull_request:
     branches: [main, sit]
   workflow_dispatch:
