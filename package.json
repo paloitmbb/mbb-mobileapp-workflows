@@ -15,7 +15,7 @@
     "build:android:bundle": "cd android && ./gradlew bundleRelease"
   },
   "dependencies": {
-    "react": "18.2.0",
+    "react": "19.2.4",
     "react-native": "0.74.1",
     "@react-navigation/native": "^6.1.17",
     "@react-navigation/stack": "^6.3.29",
