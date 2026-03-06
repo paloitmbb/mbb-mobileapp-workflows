@@ -18,8 +18,16 @@ name: CodeQL Analysis
 on:
   pull_request:
     branches: [main, sit]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
   push:
     branches: [main, sit]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
   schedule:
     # Randomised offset avoids peak load on GitHub's SARIF ingestion service.
     - cron: "43 6 * * 1" # Weekly — Monday 06:43 UTC

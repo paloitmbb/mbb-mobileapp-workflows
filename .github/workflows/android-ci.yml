@@ -18,6 +18,12 @@ name: Android CI - RegionalApp
 on:
   pull_request:
     branches: [main, sit]
+    paths:
+      - 'android/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/android-ci.yml'
   workflow_dispatch:
     inputs:
       environment:
@@ -256,7 +262,7 @@ jobs:
   # Job 4: Build Android - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build Android (${{ env.ENVIRONMENT }})
+    name: Build Android (${{ github.event.inputs.environment || 'SIT' }})
     runs-on: macos-latest
     needs: [install, scan, test]
     timeout-minutes: 60
