@@ -15,14 +15,8 @@
 name: iOS CI - RegionalApp
 
 on:
-
   pull_request:
     branches: [main, sit]
-
-permissions:
-  contents: read
-  security-events: write
-  actions: read
   workflow_dispatch:
     inputs:
       environment:
@@ -35,6 +29,11 @@ permissions:
           - Production
         default: 'SIT'
 
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 # ---------------------------------------------------------------------------
 # Environment variables
 # ---------------------------------------------------------------------------
@@ -43,12 +42,13 @@ env:
   RUBY_VERSION: '3.2'
   XCODE_WORKSPACE: 'ios/RegionalApp.xcworkspace'
   XCODE_PROJECT: 'ios/RegionalApp.xcodeproj'
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'SIT' }}
 
 # ---------------------------------------------------------------------------
 # Concurrency - cancel in-progress runs for the same branch/environment
 # ---------------------------------------------------------------------------
 concurrency:
-  group: ios-ci-${{ github.ref }}-${{ github.event.inputs.environment }}
+  group: ios-ci-${{ github.ref }}-${{ github.event.inputs.environment || 'SIT' }}
   cancel-in-progress: true
 
 jobs:
@@ -57,7 +57,6 @@ jobs:
   # ===========================================================================
   install:
     name: Install Dependencies
-    if: github.actor != 'dependabot[bot]'
     runs-on: macos-latest
     timeout-minutes: 15
     outputs:
@@ -115,20 +114,6 @@ jobs:
 
           echo "📱 App Version: $APP_VERSION_NAME ($APP_VERSION_CODE)"
 
-      # -----------------------------------------------------------------------
-      # Step 6: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 📦 Install Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Node.js** | ${{ env.NODE_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **App Version** | ${{ steps.app_version.outputs.APP_VERSION_NAME }} (${{ steps.app_version.outputs.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **npm cache key** | node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }} |" >> $GITHUB_STEP_SUMMARY
-
   # ===========================================================================
   # Job 2: Scan - Security audit and Lint
   # ===========================================================================
@@ -175,17 +160,6 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # -----------------------------------------------------------------------
-      # Step 6: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 🔍 Scan Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Security audit completed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ ESLint check completed" >> $GITHUB_STEP_SUMMARY
-
   # ===========================================================================
   # Job 3: Test - Unit tests
   # ===========================================================================
@@ -224,16 +198,6 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Run unit tests
         run: npm test
-
-      # -----------------------------------------------------------------------
-      # Step 5: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 🧪 Test Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Unit tests completed" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
   # Job 4: CodeQL - Static Application Security Testing (SAST)
@@ -299,22 +263,11 @@ jobs:
         with:
           extra_args: --only-verified
 
-      # -----------------------------------------------------------------------
-      # Step 3: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 🔑 Secret Scanning Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ TruffleHog secret scan completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Scanned full git history for verified secrets" >> $GITHUB_STEP_SUMMARY
-
   # ===========================================================================
   # Job 6: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build iOS (${{ github.event.inputs.environment }})
+    name: Build iOS (${{ env.ENVIRONMENT }})
     runs-on: macos-latest
     needs: [scan, test, codeql, secret-scan]
     timeout-minutes: 60
@@ -367,7 +320,7 @@ jobs:
       # Step 6: Install iOS certificate (Staging/Production only)
       # -----------------------------------------------------------------------
       - name: Install iOS certificate
-        if: github.event.inputs.environment != 'SIT'
+        if: env.ENVIRONMENT != 'SIT'
         run: |
           # Decode certificate from base64
           echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
@@ -378,7 +331,7 @@ jobs:
       # Step 7: Install provisioning profile (Staging/Production only)
       # -----------------------------------------------------------------------
       - name: Install provisioning profile
-        if: github.event.inputs.environment != 'SIT'
+        if: env.ENVIRONMENT != 'SIT'
         run: |
           # Decode provisioning profile from base64
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
@@ -390,7 +343,7 @@ jobs:
       # Step 8: Create temporary Xcode keychain (Staging/Production only)
       # -----------------------------------------------------------------------
       - name: Create Xcode keychain
-        if: github.event.inputs.environment != 'SIT'
+        if: env.ENVIRONMENT != 'SIT'
         run: |
           # Create a temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
@@ -409,9 +362,9 @@ jobs:
       # -----------------------------------------------------------------------
       # Step 9: Build iOS app
       # -----------------------------------------------------------------------
-      - name: Build iOS app (${{ github.event.inputs.environment }})
+      - name: Build iOS app (${{ env.ENVIRONMENT }})
         run: |
-          ENV="${{ github.event.inputs.environment }}"
+          ENV="${{ env.ENVIRONMENT }}"
 
           if [ "$ENV" = "SIT" ]; then
             npm run build:ios:debug:sit:development || \
@@ -445,7 +398,7 @@ jobs:
       # Step 10: Zip .xcarchive file
       # -----------------------------------------------------------------------
       - name: Zip XCArchive file
-        if: github.event.inputs.environment != 'SIT'
+        if: env.ENVIRONMENT != 'SIT'
         run: |
           cd ios/build
           ARCHIVE_NAME="RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
@@ -456,10 +409,10 @@ jobs:
       # Step 11: Upload .xcarchive artifact
       # -----------------------------------------------------------------------
       - name: Upload iOS XCArchive artifact
-        if: github.event.inputs.environment != 'SIT'
+        if: env.ENVIRONMENT != 'SIT'
         uses: actions/upload-artifact@v4
         with:
-          name: ios-${{ github.event.inputs.environment }}-xcarchive-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: ios-${{ env.ENVIRONMENT }}-xcarchive-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
           path: ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive.zip
           if-no-files-found: error
 
@@ -467,10 +420,10 @@ jobs:
       # Step 12: Upload .ipa artifact
       # -----------------------------------------------------------------------
       - name: Upload iOS IPA artifact
-        if: github.event.inputs.environment != 'SIT'
+        if: env.ENVIRONMENT != 'SIT'
         uses: actions/upload-artifact@v4
         with:
-          name: ios-${{ github.event.inputs.environment }}-ipa-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: ios-${{ env.ENVIRONMENT }}-ipa-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
           path: ios/build/ipa/RegionalApp-*.ipa
           if-no-files-found: error
 
@@ -485,7 +438,7 @@ jobs:
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **App** | RegionalApp (iOS) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | ${{ github.event.inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY

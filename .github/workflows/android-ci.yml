@@ -15,14 +15,8 @@
 name: Android CI - RegionalApp
 
 on:
-
   pull_request:
     branches: [main, sit]
-
-permissions:
-  contents: read
-  security-events: write
-  actions: read
   workflow_dispatch:
     inputs:
       environment:
@@ -35,6 +29,11 @@ permissions:
           - Production
         default: 'SIT'
 
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 # ---------------------------------------------------------------------------
 # Environment variables
 # ---------------------------------------------------------------------------
@@ -44,12 +43,13 @@ env:
   ANDROID_BUILD_TOOLS_VERSION: '34.0.0'
   ANDROID_PLATFORM_VERSION: '34'
   NDK_VERSION: '25.2.9519653'
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'SIT' }}
 
 # ---------------------------------------------------------------------------
 # Concurrency - cancel in-progress runs for the same branch/environment
 # ---------------------------------------------------------------------------
 concurrency:
-  group: android-ci-${{ github.ref }}-${{ github.event.inputs.environment }}
+  group: android-ci-${{ github.ref }}-${{ github.event.inputs.environment || 'SIT' }}
   cancel-in-progress: true
 
 jobs:
@@ -58,7 +58,6 @@ jobs:
   # ===========================================================================
   install:
     name: Install Dependencies
-    if: github.actor != 'dependabot[bot]'
     runs-on: macos-latest
     timeout-minutes: 15
     outputs:
@@ -112,20 +111,6 @@ jobs:
           echo "APP_VERSION_CODE=$APP_VERSION_CODE" >> $GITHUB_OUTPUT
 
           echo "📱 App Version: $APP_VERSION_NAME ($APP_VERSION_CODE)"
-
-      # -----------------------------------------------------------------------
-      # Step 6: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 📦 Install Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Node.js** | ${{ env.NODE_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **App Version** | ${{ steps.app_version.outputs.APP_VERSION_NAME }} (${{ steps.app_version.outputs.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **npm cache key** | node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }} |" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
   # Job 2: Scan - Security audit and Lint
@@ -205,19 +190,6 @@ jobs:
       - name: ESLint
         run: npm run lint
 
-      # -----------------------------------------------------------------------
-      # Step 10: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 🔍 Scan Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ npm security audit completed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ OWASP dependency check completed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Gradle lint check completed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ ESLint check completed" >> $GITHUB_STEP_SUMMARY
-
   # ===========================================================================
   # Job 3: Test - Unit tests
   # ===========================================================================
@@ -279,17 +251,6 @@ jobs:
         run: |
           cd android
           ./gradlew test
-
-      # -----------------------------------------------------------------------
-      # Step 8: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 🧪 Test Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Unit tests completed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Android Gradle unit tests completed" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
   # Job 4: CodeQL - Static Application Security Testing (SAST)
@@ -355,22 +316,11 @@ jobs:
         with:
           extra_args: --only-verified
 
-      # -----------------------------------------------------------------------
-      # Step 3: Job summary
-      # -----------------------------------------------------------------------
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## 🔑 Secret Scanning Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ TruffleHog secret scan completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Scanned full git history for verified secrets" >> $GITHUB_STEP_SUMMARY
-
   # ===========================================================================
   # Job 6: Build Android - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build Android (${{ github.event.inputs.environment }})
+    name: Build Android (${{ env.ENVIRONMENT }})
     runs-on: macos-latest
     needs: [scan, test, codeql, secret-scan]
     timeout-minutes: 60
@@ -507,8 +457,8 @@ jobs:
       # -----------------------------------------------------------------------
       # Step 14: Build AAB (Production only)
       # -----------------------------------------------------------------------
-      - name: Build Android AAB (${{ github.event.inputs.environment }})
-        if: github.event.inputs.environment == 'Production'
+      - name: Build Android AAB (${{ env.ENVIRONMENT }})
+        if: env.ENVIRONMENT == 'Production'
         run: |
           cd android
           ./gradlew bundleRelease \
@@ -523,20 +473,20 @@ jobs:
       # Step 15: Upload AAB artifact
       # -----------------------------------------------------------------------
       - name: Upload Android AAB artifact
-        if: github.event.inputs.environment == 'Production'
+        if: env.ENVIRONMENT == 'Production'
         uses: actions/upload-artifact@v4
         with:
-          name: android-${{ github.event.inputs.environment }}-aab-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: android-${{ env.ENVIRONMENT }}-aab-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
           path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
 
       # -----------------------------------------------------------------------
       # Step 16: Build APK
       # -----------------------------------------------------------------------
-      - name: Build Android APK (${{ github.event.inputs.environment }})
+      - name: Build Android APK (${{ env.ENVIRONMENT }})
         run: |
           cd android
-          ENV="${{ github.event.inputs.environment }}"
+          ENV="${{ env.ENVIRONMENT }}"
 
           if [ "$ENV" = "SIT" ]; then
             ./gradlew assembleDebug
@@ -556,7 +506,7 @@ jobs:
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-${{ github.event.inputs.environment }}-apk-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: android-${{ env.ENVIRONMENT }}-apk-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
           path: |
             android/app/build/outputs/apk/debug/*.apk
             android/app/build/outputs/apk/release/*.apk
@@ -573,7 +523,7 @@ jobs:
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **App** | RegionalApp (Android) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | ${{ github.event.inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
