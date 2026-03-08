@@ -1,0 +1,250 @@
+# =============================================================================
+# MBB Mobile App - iOS CD Workflow (React Native)
+# =============================================================================
+# This workflow deploys the iOS RegionalApp to App Store Connect / TestFlight.
+# It downloads artifacts built by the iOS CI pipeline and publishes
+# them to the appropriate distribution channel.
+#
+# Trigger: Manual dispatch (after a successful CI run).
+#
+# Job Flow:
+#   Job 1: Deploy to App Store Connect (downloads CI artifacts → publishes)
+#
+# Environments:
+#   - Staging    → TestFlight (internal / external testing)
+#   - Production → App Store submission
+#
+# Required Secrets:
+#   - APP_STORE_CONNECT_API_KEY_ID        (App Store Connect API Key ID)
+#   - APP_STORE_CONNECT_API_ISSUER_ID     (App Store Connect API Issuer ID)
+#   - APP_STORE_CONNECT_API_KEY_BASE64    (App Store Connect API Key .p8 file, base64-encoded)
+# =============================================================================
+
+name: iOS CD - RegionalApp
+
+on:
+  # ---------------------------------------------------------------------------
+  # Manual trigger — run after a successful iOS CI build
+  # ---------------------------------------------------------------------------
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment used in the CI build'
+        required: true
+        type: choice
+        options:
+          - Staging
+          - Production
+        default: 'Staging'
+      ci_run_id:
+        description: 'CI workflow run ID to download artifacts from (leave empty for latest)'
+        required: false
+        type: string
+      distribution_channel:
+        description: 'Distribution channel'
+        required: true
+        type: choice
+        options:
+          - testflight
+          - app-store
+        default: 'testflight'
+      app_version_name:
+        description: 'App version name (e.g. 1.0.0) — must match the CI build'
+        required: true
+        type: string
+        default: '1.0.0'
+      app_version_code:
+        description: 'App version code / build number (e.g. 1) — must match the CI build'
+        required: true
+        type: string
+        default: '1'
+      release_notes:
+        description: 'Release notes for TestFlight / App Store'
+        required: false
+        type: string
+        default: 'Bug fixes and performance improvements'
+
+permissions:
+  contents: write         # For creating GitHub Releases
+  actions: read           # For downloading artifacts from CI runs
+
+# ---------------------------------------------------------------------------
+# Environment variables
+# ---------------------------------------------------------------------------
+env:
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+  DISTRIBUTION_CHANNEL: ${{ github.event.inputs.distribution_channel }}
+  APP_VERSION_NAME: ${{ github.event.inputs.app_version_name }}
+  APP_VERSION_CODE: ${{ github.event.inputs.app_version_code }}
+
+# ---------------------------------------------------------------------------
+# Concurrency - prevent duplicate deployments to the same environment
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ios-cd-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # Job 1: Deploy - Download CI artifacts and publish to App Store Connect
+  # ===========================================================================
+  deploy:
+    name: Deploy to App Store Connect (${{ github.event.inputs.environment }} → ${{ github.event.inputs.distribution_channel }})
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment:
+      name: ios-${{ github.event.inputs.environment }}
+      url: https://appstoreconnect.apple.com
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Download IPA artifact from CI
+      # -----------------------------------------------------------------------
+      - name: Download IPA artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-${{ env.ENVIRONMENT }}-ipa-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          path: artifacts/ipa
+          run-id: ${{ github.event.inputs.ci_run_id || '' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 3: Download xcarchive artifact from CI
+      # -----------------------------------------------------------------------
+      - name: Download xcarchive artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-${{ env.ENVIRONMENT }}-xcarchive-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          path: artifacts/xcarchive
+          run-id: ${{ github.event.inputs.ci_run_id || '' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 4: List downloaded artifacts
+      # -----------------------------------------------------------------------
+      - name: List downloaded artifacts
+        run: |
+          echo "📦 Downloaded artifacts:"
+          find artifacts -type f \( -name "*.ipa" -o -name "*.zip" \) | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      # -----------------------------------------------------------------------
+      # Step 5: Setup App Store Connect API key
+      # -----------------------------------------------------------------------
+      - name: Setup App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+          echo "✅ App Store Connect API key created"
+
+      # -----------------------------------------------------------------------
+      # Step 6: Validate IPA with App Store Connect
+      # -----------------------------------------------------------------------
+      - name: Validate IPA
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+
+          if [ -z "$IPA_PATH" ]; then
+            echo "❌ No IPA file found in artifacts!"
+            exit 1
+          fi
+
+          echo "🔍 Validating: $IPA_PATH"
+
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+          echo "✅ IPA validation passed"
+
+      # -----------------------------------------------------------------------
+      # Step 7: Upload IPA to App Store Connect
+      # -----------------------------------------------------------------------
+      - name: Upload IPA to App Store Connect
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+
+          echo "🚀 Uploading: $IPA_PATH"
+
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+          echo "✅ IPA uploaded to App Store Connect"
+
+      # -----------------------------------------------------------------------
+      # Step 8: Set TestFlight release notes (TestFlight only)
+      # -----------------------------------------------------------------------
+      - name: Set TestFlight release notes
+        if: env.DISTRIBUTION_CHANNEL == 'testflight'
+        run: |
+          echo "📝 TestFlight what-to-test notes:"
+          echo "${{ github.event.inputs.release_notes }}"
+          echo ""
+          echo "ℹ️  Update the 'What to Test' field in App Store Connect for this build."
+          echo "   Build: ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }})"
+
+      # -----------------------------------------------------------------------
+      # Step 9: Create GitHub Release (Production only)
+      # -----------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: env.ENVIRONMENT == 'Production'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-v${{ env.APP_VERSION_NAME }}-${{ env.APP_VERSION_CODE }}
+          name: "iOS v${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }})"
+          body: |
+            ## iOS Release v${{ env.APP_VERSION_NAME }}
+
+            **Build:** ${{ env.APP_VERSION_CODE }}
+            **Channel:** ${{ env.DISTRIBUTION_CHANNEL }}
+            **Environment:** ${{ env.ENVIRONMENT }}
+            **Commit:** ${{ github.sha }}
+
+            ### Release Notes
+            ${{ github.event.inputs.release_notes }}
+          files: |
+            artifacts/ipa/*.ipa
+          draft: false
+          prerelease: ${{ env.DISTRIBUTION_CHANNEL == 'testflight' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 10: Deployment summary
+      # -----------------------------------------------------------------------
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 iOS CD Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **App** | RegionalApp (iOS) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Channel** | ${{ env.DISTRIBUTION_CHANNEL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run ID** | ${{ github.event.inputs.ci_run_id || 'latest' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered by** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+
+      # -----------------------------------------------------------------------
+      # Cleanup
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
