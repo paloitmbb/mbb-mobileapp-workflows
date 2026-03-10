@@ -39,6 +39,14 @@ on:
   # ---------------------------------------------------------------------------
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: 'Demo mode - walk through pipeline with approval gates (no actual deployment)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       ci_run_id:
         description: 'CI workflow run ID to download artifacts from'
         required: true
@@ -91,6 +99,7 @@ jobs:
       app_version_name: ${{ steps.resolve.outputs.app_version_name }}
       app_version_code: ${{ steps.resolve.outputs.app_version_code }}
       release_notes: ${{ steps.resolve.outputs.release_notes }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
 
     steps:
       # No checkout needed — this job only reads GitHub event context
@@ -135,6 +144,7 @@ jobs:
             echo "app_version_name=${APP_VERSION_NAME}" >> $GITHUB_OUTPUT
             echo "app_version_code=${APP_VERSION_CODE}" >> $GITHUB_OUTPUT
             echo "release_notes=Automated deployment from CI build ${CI_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
 
           else
             # ---------------------------------------------------------------
@@ -155,6 +165,7 @@ jobs:
             echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
             echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
             echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
+            echo "dry_run=${{ github.event.inputs.dry_run }}" >> $GITHUB_OUTPUT
           fi
 
           echo "📋 Resolved build info:"
@@ -177,9 +188,21 @@ jobs:
       COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
       APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
       APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
 
     steps:
+      - name: 🎬 Deployment Mode Indicator
+        run: |
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "🎬 DEMO MODE ENABLED - SIT Stage"
+            echo "## 🎬 Demo Mode - Stage 1: SIT" >> $GITHUB_STEP_SUMMARY
+            echo "Showing demo deployment flow (no actual upload)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🏢 PRODUCTION MODE - Actual SIT deployment"
+          fi
+
       - name: Download APK artifact from CI
+        if: env.DRY_RUN != 'true'
         uses: actions/download-artifact@v4
         with:
           name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
@@ -188,6 +211,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List downloaded artifacts
+        if: env.DRY_RUN != 'true'
         run: |
           echo "📦 Downloaded artifacts for SIT:"
           find artifacts -type f -name "*.apk" | while read f; do
@@ -195,6 +219,7 @@ jobs:
           done
 
       - name: Verify downloaded artifacts
+        if: env.DRY_RUN != 'true'
         run: |
           APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
           if [ "$APK_COUNT" -eq 0 ]; then
@@ -203,7 +228,19 @@ jobs:
           fi
           echo "✅ Found $APK_COUNT APK file(s)"
 
+      - name: 📋 Demo Validation (Dry Run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "## ✅ Pre-Deployment Checks (Demo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Verified build artifacts exist" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Validated app signing profile" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Confirmed SIT environment readiness" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Ready to proceed to UAT approval gate" >> $GITHUB_STEP_SUMMARY
+
       - name: Create service account key
+        if: env.DRY_RUN != 'true'
         run: |
           echo "::add-mask::${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}"
           SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/service-account.json
@@ -212,6 +249,7 @@ jobs:
           echo "✅ Service account key written to RUNNER_TEMP"
 
       - name: Prepare release notes
+        if: env.DRY_RUN != 'true'
         run: |
           mkdir -p whatsnew
           NOTES="${{ needs.resolve.outputs.release_notes }}"
@@ -222,6 +260,7 @@ jobs:
           echo "✅ Release notes written"
 
       - name: Upload APK to Google Play (Internal Testing)
+        if: env.DRY_RUN != 'true'
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJson: ${{ env.SERVICE_ACCOUNT_PATH }}
@@ -234,10 +273,15 @@ jobs:
       - name: SIT deployment summary
         if: always()
         run: |
-          echo "## 🚀 Android SIT Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Android SIT Stage" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "| **Mode** | 🎬 Demo (Dry Run) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| **Mode** | 🏢 Production |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| **Environment** | SIT |" >> $GITHUB_STEP_SUMMARY
           echo "| **Track** | Internal Testing |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
