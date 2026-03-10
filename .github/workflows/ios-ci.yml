@@ -46,9 +46,9 @@ permissions:
 env:
   NODE_VERSION: '20'
   RUBY_VERSION: '3.2'
-  XCODE_WORKSPACE: 'ios/RegionalApp.xcworkspace'
-  XCODE_PROJECT: 'ios/RegionalApp.xcodeproj'
-  XCODE_SCHEME: 'RegionalApp'
+  XCODE_WORKSPACE: 'ios/MyTestApp.xcworkspace'
+  XCODE_PROJECT: 'ios/MyTestApp.xcodeproj'
+  XCODE_SCHEME: 'MyTestApp'
 
 # ---------------------------------------------------------------------------
 # Concurrency - cancel in-progress runs for the same branch/environment
@@ -331,7 +331,7 @@ jobs:
 
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.32.5
-        if: always()
+        if: always() && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: 'trivy-results.sarif'
           category: 'trivy-ios'

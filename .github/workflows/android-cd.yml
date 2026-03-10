@@ -81,6 +81,10 @@ jobs:
   resolve:
     name: Resolve CI Build Info
     runs-on: ubuntu-latest
+    # Only proceed if triggered manually OR if the CI workflow succeeded
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     outputs:
       ci_run_id: ${{ steps.resolve.outputs.ci_run_id }}
       commit_sha: ${{ steps.resolve.outputs.commit_sha }}
@@ -89,21 +93,74 @@ jobs:
       release_notes: ${{ steps.resolve.outputs.release_notes }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # No checkout needed — this job only reads GitHub event context
+      # and writes outputs. It never touches repository files.
 
       - name: Resolve build metadata
         id: resolve
         run: |
-          echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
-          echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
-          echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
-          echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
-          echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            # ---------------------------------------------------------------
+            # Automatic trigger — read metadata from workflow_run event
+            # github.event.inputs is EMPTY for workflow_run — never use it here
+            # ---------------------------------------------------------------
+            CI_RUN_ID="${{ github.event.workflow_run.id }}"
+            COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+
+            # Fetch artifact list from the CI run to extract version info
+            # Version is embedded in artifact name: android-release-apk-vX.X.X(Y)-SHA
+            ARTIFACT_NAME=$(gh api \
+              /repos/${{ github.repository }}/actions/runs/${CI_RUN_ID}/artifacts \
+              --jq '.artifacts[] | select(.name | startswith("android-release-apk")) | .name' \
+              | head -1)
+
+            echo "📦 Found artifact: $ARTIFACT_NAME"
+
+            if [ -z "$ARTIFACT_NAME" ]; then
+              echo "❌ No android-release-apk artifact found in CI run $CI_RUN_ID"
+              exit 1
+            fi
+
+            # Extract version from artifact name pattern: vX.X.X(Y)-SHA
+            APP_VERSION_NAME=$(echo "$ARTIFACT_NAME" | grep -oP '(?<=v)[0-9]+\.[0-9]+\.[0-9]+')
+            APP_VERSION_CODE=$(echo "$ARTIFACT_NAME" | grep -oP '(?<=\()[0-9]+(?=\))')
+
+            if [ -z "$APP_VERSION_NAME" ] || [ -z "$APP_VERSION_CODE" ]; then
+              echo "❌ Could not extract version from artifact name: $ARTIFACT_NAME"
+              exit 1
+            fi
+
+            echo "ci_run_id=${CI_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+            echo "app_version_name=${APP_VERSION_NAME}" >> $GITHUB_OUTPUT
+            echo "app_version_code=${APP_VERSION_CODE}" >> $GITHUB_OUTPUT
+            echo "release_notes=Automated deployment from CI build ${CI_RUN_ID}" >> $GITHUB_OUTPUT
+
+          else
+            # ---------------------------------------------------------------
+            # Manual trigger — read from workflow_dispatch inputs
+            # All values explicitly provided by the person triggering the run
+            # ---------------------------------------------------------------
+            if [ -z "${{ github.event.inputs.ci_run_id }}" ]; then
+              echo "❌ ci_run_id is required for manual dispatch"
+              exit 1
+            fi
+            if [ -z "${{ github.event.inputs.commit_sha }}" ]; then
+              echo "❌ commit_sha is required for manual dispatch"
+              exit 1
+            fi
+
+            echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
+            echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
+            echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
+            echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
+          fi
 
           echo "📋 Resolved build info:"
           cat $GITHUB_OUTPUT
-
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # ===========================================================================
   # Stage 1: Deploy to SIT (automatic — no approval needed)
   # ===========================================================================
@@ -114,7 +171,7 @@ jobs:
     timeout-minutes: 30
     environment:
       name: android-SIT
-      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+      url: https://play.google.com/console/u/0/developers
     env:
       CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
       COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
@@ -122,9 +179,6 @@ jobs:
       APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download APK artifact from CI
         uses: actions/download-artifact@v4
         with:
@@ -140,19 +194,44 @@ jobs:
             echo "  - $f ($(du -h "$f" | cut -f1))"
           done
 
+      - name: Verify downloaded artifacts
+        run: |
+          AAB_COUNT=$(find artifacts/aab -name "*.aab" 2>/dev/null | wc -l)
+          APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
+
+          if [ "$AAB_COUNT" -eq 0 ]; then
+            echo "❌ No AAB files found — download may have failed"
+            exit 1
+          fi
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "❌ No APK files found — download may have failed"
+            exit 1
+          fi
+
+          echo "✅ Found $AAB_COUNT AAB file(s) and $APK_COUNT APK file(s)"
+
       - name: Create service account key
         run: |
-          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
+          echo "::add-mask::${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}"
+          SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/service-account.json
+          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > "$SERVICE_ACCOUNT_PATH"
+          echo "SERVICE_ACCOUNT_PATH=$SERVICE_ACCOUNT_PATH" >> $GITHUB_ENV
+          echo "✅ Service account key written to RUNNER_TEMP"
 
       - name: Prepare release notes
         run: |
           mkdir -p whatsnew
-          echo "${{ needs.resolve.outputs.release_notes }}" > whatsnew/whatsnew-en-US
+          NOTES="${{ needs.resolve.outputs.release_notes }}"
+          if [ -z "$NOTES" ]; then
+            NOTES="Bug fixes and performance improvements"
+          fi
+          echo "$NOTES" > whatsnew/whatsnew-en-US
+          echo "✅ Release notes written"
 
       - name: Upload APK to Google Play (Internal Testing)
         uses: r0adkll/upload-google-play@v1
         with:
-          serviceAccountJson: service-account.json
+          serviceAccountJson: ${{ env.SERVICE_ACCOUNT_PATH }}
           packageName: com.mbb.regionalapp
           releaseFiles: artifacts/apk/*.apk
           track: internal
@@ -174,7 +253,9 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f service-account.json
+        run: |
+          rm -f "${{ env.SERVICE_ACCOUNT_PATH }}"
+          echo "✅ Cleanup complete"
 
   # ===========================================================================
   # Stage 2: Deploy to UAT (requires approval)
@@ -182,11 +263,11 @@ jobs:
   deploy-uat:
     name: Deploy to UAT (Closed Testing)
     runs-on: ubuntu-latest
-    needs: [resolve, deploy-sit]                                                                                                                                                                                                                                                                                                       
+    needs: [resolve, deploy-sit]                                                                                                                                                                                                                                                                                          
     timeout-minutes: 30
     environment:
       name: android-UAT
-      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+      url: https://play.google.com/console/u/0/developers
     env:
       CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
       COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
@@ -194,9 +275,6 @@ jobs:
       APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download APK artifact from CI
         uses: actions/download-artifact@v4
         with:
@@ -212,19 +290,37 @@ jobs:
             echo "  - $f ($(du -h "$f" | cut -f1))"
           done
 
+      - name: Verify downloaded artifacts
+        run: |
+          APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "❌ No APK files found — download may have failed"
+            exit 1
+          fi
+          echo "✅ Found $APK_COUNT APK file(s)"
+
       - name: Create service account key
         run: |
-          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
+          echo "::add-mask::${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}"
+          SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/service-account.json
+          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > "$SERVICE_ACCOUNT_PATH"
+          echo "SERVICE_ACCOUNT_PATH=$SERVICE_ACCOUNT_PATH" >> $GITHUB_ENV
+          echo "✅ Service account key written to RUNNER_TEMP"
 
       - name: Prepare release notes
         run: |
           mkdir -p whatsnew
-          echo "${{ needs.resolve.outputs.release_notes }}" > whatsnew/whatsnew-en-US
+          NOTES="${{ needs.resolve.outputs.release_notes }}"
+          if [ -z "$NOTES" ]; then
+            NOTES="Bug fixes and performance improvements"
+          fi
+          echo "$NOTES" > whatsnew/whatsnew-en-US
+          echo "✅ Release notes written"
 
       - name: Upload APK to Google Play (Alpha / Closed Testing)
         uses: r0adkll/upload-google-play@v1
         with:
-          serviceAccountJson: service-account.json
+          serviceAccountJson: ${{ env.SERVICE_ACCOUNT_PATH }}
           packageName: com.mbb.regionalapp
           releaseFiles: artifacts/apk/*.apk
           track: alpha
@@ -246,7 +342,9 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f service-account.json
+        run: |
+          rm -f "${{ env.SERVICE_ACCOUNT_PATH }}"
+          echo "✅ Cleanup complete"
 
   # ===========================================================================
   # Stage 3: Deploy to Production (requires approval)
@@ -258,7 +356,7 @@ jobs:
     timeout-minutes: 30
     environment:
       name: android-Production
-      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+      url: https://play.google.com/console/u/0/developers
     env:
       CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
       COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
@@ -266,9 +364,6 @@ jobs:
       APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download AAB artifact from CI
         uses: actions/download-artifact@v4
         with:
@@ -292,19 +387,37 @@ jobs:
             echo "  - $f ($(du -h "$f" | cut -f1))"
           done
 
+      - name: Verify downloaded artifacts
+        run: |
+          APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "❌ No APK files found — download may have failed"
+            exit 1
+          fi
+          echo "✅ Found $APK_COUNT APK file(s)"
+
       - name: Create service account key
         run: |
-          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
+          echo "::add-mask::${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}"
+          SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/service-account.json
+          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > "$SERVICE_ACCOUNT_PATH"
+          echo "SERVICE_ACCOUNT_PATH=$SERVICE_ACCOUNT_PATH" >> $GITHUB_ENV
+          echo "✅ Service account key written to RUNNER_TEMP"
 
       - name: Prepare release notes
         run: |
           mkdir -p whatsnew
-          echo "${{ needs.resolve.outputs.release_notes }}" > whatsnew/whatsnew-en-US
+          NOTES="${{ needs.resolve.outputs.release_notes }}"
+          if [ -z "$NOTES" ]; then
+            NOTES="Bug fixes and performance improvements"
+          fi
+          echo "$NOTES" > whatsnew/whatsnew-en-US
+          echo "✅ Release notes written"
 
       - name: Upload AAB to Google Play (Production)
         uses: r0adkll/upload-google-play@v1
         with:
-          serviceAccountJson: service-account.json
+          serviceAccountJson: ${{ env.SERVICE_ACCOUNT_PATH }}
           packageName: com.mbb.regionalapp
           releaseFiles: artifacts/aab/*.aab
           track: production
@@ -328,6 +441,7 @@ jobs:
             ### Release Notes
             ${{ needs.resolve.outputs.release_notes }}
           files: |
+            artifacts/apk/*.aab
             artifacts/apk/*.apk
           draft: false
           prerelease: false
@@ -350,4 +464,6 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f service-account.json
+        run: |
+          rm -f "${{ env.SERVICE_ACCOUNT_PATH }}"
+          echo "✅ Cleanup complete"
