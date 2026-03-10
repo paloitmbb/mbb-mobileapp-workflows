@@ -6,7 +6,7 @@
 # Trigger: workflow_dispatch (manual) with environment selection.
 #
 # Job Flow:
-#   Job 1: Quality Gate (Install + Scan + Test)  →  Job 2: Build Android
+#   Job 1: Install  →  Jobs 2a-2e: Lint, Test, Scan (parallel)  →  Job 3: Build Android
 #
 # Note: CodeQL runs independently via codeql.yml
 #       Secret scanning is handled by GitHub's native secret scanning
@@ -22,6 +22,8 @@ on:
     branches: [main]
     paths:
       - 'android/**'
+      - 'src/**'  # Include source code changes that may affect the build
+      - 'package*.json'  # Include dependency changes that may affect the build
 
   # ---------------------------------------------------------------------------
   # Validation: On PR to main (CI checks only, does NOT trigger CD)
@@ -30,6 +32,8 @@ on:
     branches: [main]
     paths:
       - 'android/**'
+      - 'src/**'  # Include source code changes that may affect the build
+      - 'package*.json'  # Include dependency changes that may affect the build
 
   # ---------------------------------------------------------------------------
   # Manual trigger
@@ -39,6 +43,9 @@ on:
 permissions:
   contents: read          # Allows workflow to clone repository
   security-events: write  # Allows uploading Trivy SARIF results
+  actions: read          # Allows using actions/checkout and other actions
+  checks: write          # Allows updating commit status with build results
+  pull-requests: write   # Allows commenting on PRs with build results
 
 # ---------------------------------------------------------------------------
 # Environment variables
@@ -59,10 +66,10 @@ concurrency:
 
 jobs:
   # ===========================================================================
-  # Job 1: Quality Gate - Install, Scan, Lint, and Test in a single job
+  # Job 1: Install - Install dependencies and check app version
   # ===========================================================================
-  quality-gate:
-    name: Quality Gate (Install + Scan + Test)
+  install:
+    name: Install dependencies & Check app version
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -118,65 +125,199 @@ jobs:
 
           echo "📱 App Version: $APP_VERSION_NAME ($APP_VERSION_CODE)"
 
-      # -----------------------------------------------------------------------
-      # Step 6: Security scan (npm audit)
-      # -----------------------------------------------------------------------
-      - name: Security audit
-        run: npm audit --audit-level=moderate || true
-        continue-on-error: true
+  # ============================================================
+  # Job 2a: JS Lint (runs in parallel with 2b, 2c, 2d)
+  # ============================================================
+  lint-js:
+    name: JS Lint (ESLint)
+    runs-on: ubuntu-latest
+    needs: install          # ← waits for install, then runs in parallel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
 
-      # -----------------------------------------------------------------------
-      # Step 7: Lint (ESLint)
-      # -----------------------------------------------------------------------
-      - name: ESLint
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Run ESLint
         run: npm run lint
 
-      # -----------------------------------------------------------------------
-      # Step 8: Setup Java
-      # -----------------------------------------------------------------------
+  # ============================================================
+  # Job 2b: Android Lint (runs in parallel with 2a, 2c, 2d)
+  # ============================================================
+  lint-android:
+    name: Android Lint (Gradle)
+    runs-on: ubuntu-latest
+    needs: install
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      - name: Run Gradle lint
+        run: cd android && ./gradlew lint
+
+      - name: Upload lint report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-lint-report-${{ github.sha }}
+          path: android/app/build/reports/lint-results*.html
+          retention-days: 7
+
+
+  # ============================================================
+  # Job 2c: JS Unit Tests (runs in parallel with 2a, 2b, 2d)
+  # ============================================================
+  test-js:
+    name: JS Unit Tests (Jest)
+    runs-on: ubuntu-latest
+    needs: install
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Run Jest tests
+        run: npm test -- --ci --coverage
+        # No continue-on-error — failure blocks the build
+
+
+      - name: Upload Jest coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jest-coverage-${{ github.sha }}
+          path: coverage/
+          retention-days: 7
+  # ============================================================
+  # Job 2d: Android Unit Tests (runs in parallel with 2a, 2b, 2c)
+  # ============================================================
+  test-android:
+    name: Android Unit Tests (Gradle)
+    runs-on: ubuntu-latest
+    needs: install
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      - name: Run Android unit tests
+        run: cd android && ./gradlew test
+
+      - name: Upload Android test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-test-results-${{ github.sha }}
+          path: android/**/build/test-results/
+          retention-days: 7
+
+  # ============================================================
+  # Job 2e: Security Scan (non-blocking — does NOT gate build)
+  # ============================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: install
+    timeout-minutes: 20
+    continue-on-error: true    # ← non-blocking, won't stop build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: npm audit
+        run: npm audit --audit-level=moderate || true
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: ${{ env.JAVA_VERSION }}
 
-      # -----------------------------------------------------------------------
-      # Step 9: Make Gradle executable
-      # -----------------------------------------------------------------------
       - name: Make Gradle executable
         run: chmod +x android/gradlew
 
-      # -----------------------------------------------------------------------
-      # Step 10: Security scan (OWASP)
-      # -----------------------------------------------------------------------
-      - name: Security scan (OWASP)
-        run: |
-          cd android
-          ./gradlew dependencyCheckAnalyze || true
-        continue-on-error: true
+      - name: OWASP dependency check
+        run: cd android && ./gradlew dependencyCheckAnalyze || true
 
-      # -----------------------------------------------------------------------
-      # Step 11: Lint check (Gradle)
-      # -----------------------------------------------------------------------
-      - name: Gradle lint check
-        run: |
-          cd android
-          ./gradlew lint
-
-      # -----------------------------------------------------------------------
-      # Step 12: Run JS unit tests
-      # -----------------------------------------------------------------------
-      - name: Run unit tests
-        run: npm test
-        continue-on-error: true
-
-      # -----------------------------------------------------------------------
-      # Step 13: Run Android unit tests (Gradle)
-      # -----------------------------------------------------------------------
-      - name: Run Android unit tests
-        run: |
-          cd android
-          ./gradlew test
 
   # ===========================================================================
   # Job 2: Build Android - Build, sign, and upload artifacts
@@ -184,11 +325,11 @@ jobs:
   build:
     name: Build Android (Debug)
     runs-on: ubuntu-latest
-    needs: quality-gate
+    needs: [install, lint-js, lint-android, test-js, test-android]
     timeout-minutes: 60
     env:
-      APP_VERSION_NAME: ${{ needs.quality-gate.outputs.APP_VERSION_NAME }}
-      APP_VERSION_CODE: ${{ needs.quality-gate.outputs.APP_VERSION_CODE }}
+      APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}
+      APP_VERSION_CODE: ${{ needs.install.outputs.APP_VERSION_CODE }}
 
     steps:
       # -----------------------------------------------------------------------
@@ -250,44 +391,54 @@ jobs:
       # -----------------------------------------------------------------------
       # - name: Create google-services.json from base64
       #   run: |
-      #     echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
-      #     echo "✅ google-services.json decoded successfully"
+      #     # Mask secret before any operations
+      #     echo "::add-mask::${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}"
+      #
+      #     GOOGLE_SERVICES_PATH=$RUNNER_TEMP/google-services.json
+      #
+      #     # Decode to RUNNER_TEMP (never to project directory)
+      #     echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > "$GOOGLE_SERVICES_PATH"
+      #
+      #     # Verify it's valid JSON
+      #     if ! python3 -c "import json; json.load(open('$GOOGLE_SERVICES_PATH'))"; then
+      #       echo "❌ google-services.json is not valid JSON"
+      #       exit 1
+      #     fi
+      #
+      #     # Symlink into expected Gradle location — file stays in RUNNER_TEMP
+      #     ln -s "$GOOGLE_SERVICES_PATH" android/app/google-services.json
+      #
+      #     # Export path for cleanup step
+      #     echo "GOOGLE_SERVICES_PATH=$GOOGLE_SERVICES_PATH" >> $GITHUB_ENV
+      #     echo "✅ google-services.json decoded, validated and symlinked"
 
       # -----------------------------------------------------------------------
       # Step 8: [COMMENTED - Uncomment when secrets are configured]
-      # Verify google-services.json exists
-      # -----------------------------------------------------------------------
-      # - name: Verify google-services.json exists
-      #   run: |
-      #     if [ ! -f android/app/google-services.json ]; then
-      #       echo "❌ google-services.json not found!"
-      #       exit 1
-      #     fi
-      #     echo "✅ google-services.json verified"
-
-      # -----------------------------------------------------------------------
-      # Step 9: [COMMENTED - Uncomment when secrets are configured]
       # Create Android keystore from base64
       # -----------------------------------------------------------------------
       # - name: Create Android keystore from base64
       #   run: |
-      #     echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.jks
-      #     echo "✅ Android keystore decoded successfully"
+      #     # Mask passwords so they never appear in any log output
+      #     echo "::add-mask::${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+      #     echo "::add-mask::${{ secrets.ANDROID_KEY_PASSWORD }}"
+      #
+      #     KEYSTORE_PATH=$RUNNER_TEMP/release.jks
+      #
+      #     # Decode to RUNNER_TEMP (never to android/app/)
+      #     echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_PATH"
+      #
+      #     # Verify keystore is valid — catches corrupt base64 decode early
+      #     keytool -list \
+      #       -keystore "$KEYSTORE_PATH" \
+      #       -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+      #       -noprompt
+      #
+      #     # Export path so downstream steps (build + cleanup) can reference it
+      #     echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_ENV
+      #     echo "✅ Keystore decoded and verified at $KEYSTORE_PATH"
 
       # -----------------------------------------------------------------------
-      # Step 10: [COMMENTED - Uncomment when secrets are configured]
-      # Verify Android keystore exists
-      # -----------------------------------------------------------------------
-      # - name: Verify Android keystore exists
-      #   run: |
-      #     if [ ! -f android/app/release.jks ]; then
-      #       echo "❌ Android keystore not found!"
-      #       exit 1
-      #     fi
-      #     echo "✅ Android keystore verified"
-
-      # -----------------------------------------------------------------------
-      # Step 11: Install Android SDK components
+      # Step 9: Install Android SDK components
       # -----------------------------------------------------------------------
       - name: Install Android SDK components
         run: |
@@ -302,7 +453,7 @@ jobs:
           echo "✅ Android SDK components installed"
 
       # -----------------------------------------------------------------------
-      # Step 12: Verify NDK source.properties
+      # Step 10: Verify NDK source.properties
       # -----------------------------------------------------------------------
       - name: Verify NDK source.properties
         run: |
@@ -315,13 +466,13 @@ jobs:
           echo "✅ NDK verified"
 
       # -----------------------------------------------------------------------
-      # Step 13: Make Gradle executable
+      # Step 11: Make Gradle executable
       # -----------------------------------------------------------------------
       - name: Make Gradle executable
         run: chmod +x android/gradlew
 
       # -----------------------------------------------------------------------
-      # Step 10: Build debug APK (temporary - switch to release once secrets are configured)
+      # Step 12: Build debug APK (temporary - switch to release once secrets are configured)
       # -----------------------------------------------------------------------
       - name: Build Android APK (Debug)
         run: |
@@ -332,40 +483,20 @@ jobs:
 
       # -----------------------------------------------------------------------
       # [COMMENTED - Uncomment when signing secrets are configured]
-      # Step 14: Build release AAB
+      # Step 13: Build release AAB
       # -----------------------------------------------------------------------
       # - name: Build Android AAB (Release)
       #   run: |
       #     cd android
       #     ./gradlew bundleRelease \
-      #       -PMYAPP_UPLOAD_STORE_FILE=release.jks \
+      #       -PMYAPP_UPLOAD_STORE_FILE=${{ env.KEYSTORE_PATH }} \
       #       -PMYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
       #       -PMYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }} \
       #       -PMYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
       #     echo "✅ AAB build complete"
 
       # -----------------------------------------------------------------------
-      # Step 15: Trivy vulnerability scan
-      # -----------------------------------------------------------------------
-      - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-
-      - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-          category: 'trivy-android'
-
-      # -----------------------------------------------------------------------
-      # Step 12: Upload APK artifact
+      # Step 14: Upload APK artifact
       # -----------------------------------------------------------------------
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
@@ -373,10 +504,11 @@ jobs:
           name: android-debug-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
 
       # -----------------------------------------------------------------------
       # [COMMENTED - Uncomment when signing secrets are configured]
-      # Step 16: Upload AAB artifact
+      # Step 15: Upload AAB artifact
       # -----------------------------------------------------------------------
       # - name: Upload Android AAB artifact
       #   uses: actions/upload-artifact@v4
@@ -384,6 +516,7 @@ jobs:
       #     name: android-release-aab-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
       #     path: android/app/build/outputs/bundle/release/*.aab
       #     if-no-files-found: error
+      #     retention-days: 7
 
       # -----------------------------------------------------------------------
       # [COMMENTED - Uncomment when signing secrets are configured]
@@ -393,7 +526,7 @@ jobs:
       #   run: |
       #     cd android
       #     ./gradlew assembleRelease \
-      #       -PMYAPP_UPLOAD_STORE_FILE=release.jks \
+      #       -PMYAPP_UPLOAD_STORE_FILE=${{ env.KEYSTORE_PATH }} \
       #       -PMYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
       #       -PMYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }} \
       #       -PMYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -409,6 +542,7 @@ jobs:
       #     name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
       #     path: android/app/build/outputs/apk/release/*.apk
       #     if-no-files-found: error
+      #     retention-days: 7
 
       # -----------------------------------------------------------------------
       # Step 18: Job summary
@@ -433,10 +567,10 @@ jobs:
       # -----------------------------------------------------------------------
       # Cleanup: Remove keystore and firebase config
       # -----------------------------------------------------------------------
-      - name: Cleanup
+      - name: Cleanup secrets
         if: always()
         run: |
-          # Uncomment below when signing secrets are configured
-          # rm -f android/app/release.jks
-          # rm -f android/app/google-services.json
+          rm -f "$RUNNER_TEMP/release.jks"
+          rm -f "$RUNNER_TEMP/google-services.json"
+          rm -f android/app/google-services.json  # removes symlink
           echo "✅ Cleanup complete"

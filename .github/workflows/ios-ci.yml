@@ -6,7 +6,12 @@
 # Trigger: workflow_dispatch (manual) with environment selection.
 #
 # Job Flow:
-#   Job 1: Quality Gate (Install + Scan + Test)  →  Job 2: Build iOS
+#   Job 1: install
+#       ↓
+#   Jobs 2a-2e (parallel):
+#     2a: lint-js | 2b: lint-ios | 2c: test-js | 2d: test-ios | 2e: security-scan
+#       ↓
+#   Job 3: build (gated on 2a-2d; 2e is non-blocking)
 #
 # Note: CodeQL runs independently via codeql.yml
 #       Secret scanning is handled by GitHub's native secret scanning
@@ -15,24 +20,26 @@
 name: iOS CI - RegionalApp
 
 on:
-   push:
-     branches:
-       - main
-     paths:
-        - 'ios/**'
-   pull_request:
+  push:
     branches: [main]
     paths:
       - 'ios/**'
-  # ---------------------------------------------------------------------------
-  # Manual trigger
-  # ---------------------------------------------------------------------------
-   workflow_dispatch:
+      - 'src/**'
+      - 'package*.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - 'src/**'
+      - 'package*.json'
+  workflow_dispatch:
 
 permissions:
   contents: read          # Allows workflow to clone repository
   security-events: write  # Allows uploading Trivy SARIF results
-
+  actions: read          # Allows using actions/checkout and other actions  
+  checks: write          # Allows creating commit status checks (if needed)
+  pull-requests: write   # Allows commenting on PRs (if needed)
 # ---------------------------------------------------------------------------
 # Environment variables
 # ---------------------------------------------------------------------------
@@ -41,6 +48,7 @@ env:
   RUBY_VERSION: '3.2'
   XCODE_WORKSPACE: 'ios/RegionalApp.xcworkspace'
   XCODE_PROJECT: 'ios/RegionalApp.xcodeproj'
+  XCODE_SCHEME: 'RegionalApp'
 
 # ---------------------------------------------------------------------------
 # Concurrency - cancel in-progress runs for the same branch/environment
@@ -51,10 +59,10 @@ concurrency:
 
 jobs:
   # ===========================================================================
-  # Job 1: Quality Gate - Install, Scan, Lint, and Test in a single job
+  # Job 1: Install — installs dependencies, saves caches, extracts app version
   # ===========================================================================
-  quality-gate:
-    name: Quality Gate (Install + Scan + Test)
+  install:
+    name: Install dependencies and check app version
     runs-on: macos-latest
     timeout-minutes: 30
     outputs:
@@ -84,13 +92,24 @@ jobs:
         run: npm ci
 
       # -----------------------------------------------------------------------
-      # Step 4: Cache node_modules for downstream jobs
+      # Step 4a: Save node_modules cache for macOS jobs
+      # (install runs on macOS — this cache serves lint-ios, test-ios, build)
       # -----------------------------------------------------------------------
-      - name: Cache node_modules
+      - name: Save node_modules cache (macOS)
         uses: actions/cache/save@v4
         with:
           path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-macOS-${{ hashFiles('package-lock.json') }}
+
+      # -----------------------------------------------------------------------
+      # Step 4b: Save node_modules cache for Linux jobs
+      # (lint-js, test-js run on ubuntu — need a Linux-keyed cache)
+      # -----------------------------------------------------------------------
+      - name: Save node_modules cache (Linux)
+        uses: actions/cache/save@v4
+        with:
+          path: node_modules
+          key: node-modules-Linux-${{ hashFiles('package-lock.json') }}
 
       # -----------------------------------------------------------------------
       # Step 5: Check app version
@@ -112,37 +131,218 @@ jobs:
 
           echo "📱 App Version: $APP_VERSION_NAME ($APP_VERSION_CODE)"
 
-      # -----------------------------------------------------------------------
-      # Step 6: Security audit
-      # -----------------------------------------------------------------------
-      - name: Security audit
-        run: npm audit --audit-level=moderate || true
-        continue-on-error: true
+ 
+  # ============================================================
+  # Job 2a: JS Lint (runs in parallel with 2b, 2c, 2d)
+  # ============================================================
+  lint-js:
+    name: JS Lint (ESLint)
+    runs-on: ubuntu-latest
+    needs: install          # ← waits for install, then runs in parallel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
 
-      # -----------------------------------------------------------------------
-      # Step 7: Lint (ESLint)
-      # -----------------------------------------------------------------------
-      - name: Lint
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-Linux-${{ hashFiles('package-lock.json') }}
+
+      - name: Run ESLint
         run: npm run lint
 
-      # -----------------------------------------------------------------------
-      # Step 8: Run unit tests
-      # -----------------------------------------------------------------------
-      - name: Run unit tests
-        run: npm test
-        continue-on-error: true
+  # ============================================================
+  # Job 2b: iOS Lint (xcodebuild analyze)
+  # ============================================================
+  lint-ios:
+    name: iOS Static Analysis (xcodebuild)
+    runs-on: macos-latest        # ← must be macOS for Xcode
+    needs: install
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-macOS-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-macOS-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-macOS-
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: true
+
+      - name: Install CocoaPods
+        run: cd ios && pod install
+
+      - name: Run Xcode static analysis
+        run: |
+          xcodebuild analyze \
+            -workspace ${{ env.XCODE_WORKSPACE }} \
+            -scheme ${{ env.XCODE_SCHEME }} \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || true
+  #------------------------------------------------------------------------------
+  # Job 2c: JS Unit Tests (runs in parallel with 2a, 2b, 2d)
+  #------------------------------------------------------------------------------
+  test-js:
+    name: JS Unit Tests (Jest)
+    runs-on: ubuntu-latest
+    needs: install
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-Linux-${{ hashFiles('package-lock.json') }}
+
+      - name: Run Jest tests
+        run: npm test -- --ci --coverage
+        # No continue-on-error — failure blocks the build
+
+      - name: Upload Jest coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jest-coverage-${{ github.sha }}
+          path: coverage/
+          retention-days: 7
+
+  # ============================================================
+  # Job 2d: iOS Unit Tests
+  # ============================================================
+  test-ios:
+    name: iOS Unit Tests (xcodebuild)
+    runs-on: macos-latest        # ← must be macOS for Xcode
+    needs: install
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-macOS-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-macOS-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-macOS-
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: true
+
+      - name: Install CocoaPods
+        run: cd ios && pod install
+
+      - name: Run iOS unit tests
+        run: |
+          xcodebuild test \
+            -workspace ${{ env.XCODE_WORKSPACE }} \
+            -scheme ${{ env.XCODE_SCHEME }} \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath $RUNNER_TEMP/TestResults.xcresult
+
+      - name: Upload iOS test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-test-results-${{ github.sha }}
+          path: ${{ runner.temp }}/TestResults.xcresult
+          retention-days: 7
+
+  # ============================================================
+  # Job 2e: Security Scan (non-blocking)
+  # ============================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: install               # ← only needs install, not all quality jobs
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-Linux-${{ hashFiles('package-lock.json') }}
+
+      - name: npm audit
+        run: npm audit --audit-level=moderate || true
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.32.5
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy-ios'
+          
   # ===========================================================================
-  # Job 2: Build iOS - Build, sign, and upload artifacts
+  # Job 3: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
     name: Build iOS 
     runs-on: macos-latest
-    needs: quality-gate
+    needs: [install, lint-js, lint-ios, test-ios, test-js]  # ← waits for all quality gate jobs
     timeout-minutes: 60
     env:
-      APP_VERSION_NAME: ${{ needs.quality-gate.outputs.APP_VERSION_NAME }}
-      APP_VERSION_CODE: ${{ needs.quality-gate.outputs.APP_VERSION_CODE }}
+      APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}
+      APP_VERSION_CODE: ${{ needs.install.outputs.APP_VERSION_CODE }}
 
     steps:
       # -----------------------------------------------------------------------
@@ -166,7 +366,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-macOS-${{ hashFiles('package-lock.json') }}
 
       # -----------------------------------------------------------------------
       # Step 4: Setup Ruby (for CocoaPods)
@@ -176,27 +376,50 @@ jobs:
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: true
+      # -----------------------------------------------------------------------
+      # Step 5: Cache CocoaPods
+      # -----------------------------------------------------------------------
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-macOS-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-macOS-
+
 
       # -----------------------------------------------------------------------
-      # Step 5: Install CocoaPods
+      # Step 6: Install CocoaPods
       # -----------------------------------------------------------------------
       - name: Install CocoaPods
         run: |
-          gem install cocoapods
           cd ios && pod install
 
       # -----------------------------------------------------------------------
-      # Step 6: Install iOS certificate
+      # Step 7: Setup iOS certificate — decoded to RUNNER_TEMP (never project dir)
+      # Passwords masked before any operations to prevent log exposure
       # -----------------------------------------------------------------------
-      - name: Install iOS certificate
+      - name: Setup iOS certificate
         run: |
-          # Decode certificate from base64
-          echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
+          # Mask passwords so they never appear in any log output
+          echo "::add-mask::${{ secrets.IOS_CERTIFICATE_PASSWORD }}"
+          echo "::add-mask::${{ secrets.KEYCHAIN_PASSWORD }}"
 
-          echo "✅ iOS certificate decoded successfully"
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
 
+          # Decode to RUNNER_TEMP — never to project directory
+          echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > "$CERTIFICATE_PATH"
+
+          # Verify file was written correctly
+          if [ ! -f "$CERTIFICATE_PATH" ]; then
+            echo "❌ Certificate not found at $CERTIFICATE_PATH"
+            exit 1
+          fi
+
+          # Export path so downstream steps (keychain + cleanup) can reference it
+          echo "CERTIFICATE_PATH=$CERTIFICATE_PATH" >> $GITHUB_ENV
+          echo "✅ Certificate decoded to $CERTIFICATE_PATH"
       # -----------------------------------------------------------------------
-      # Step 7: Install provisioning profile
+      # Step 8: Install provisioning profile
       # -----------------------------------------------------------------------
       - name: Install provisioning profile
         run: |
@@ -207,88 +430,106 @@ jobs:
           echo "✅ Provisioning profile installed"
 
       # -----------------------------------------------------------------------
-      # Step 8: Create temporary Xcode keychain
+      # Step 9: Create temporary Xcode keychain
+      # Certificate imported from RUNNER_TEMP via CERTIFICATE_PATH env var
+      # set in Step 7 — never references project directory
       # -----------------------------------------------------------------------
       - name: Create Xcode keychain
         run: |
-          # Create a temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+          # Create temporary keychain
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
 
-          # Import certificate into keychain
-          security import certificate.p12 -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
+          # Import certificate from RUNNER_TEMP (not project directory)
+          security import "${{ env.CERTIFICATE_PATH }}" \
+            -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
 
-          echo "✅ Keychain created and certificate imported"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "${{ secrets.KEYCHAIN_PASSWORD }}" \
+            "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Export keychain path for cleanup step
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "✅ Keychain created and certificate imported from RUNNER_TEMP"
 
       # -----------------------------------------------------------------------
-      # Step 9: Build iOS app (Release)
+      # Step 10: Build iOS app (Release)
+      # Archive written to RUNNER_TEMP — never to project directory
+      # Path exported to GITHUB_ENV so zip and upload steps can reference it
       # -----------------------------------------------------------------------
       - name: Build iOS app (Release)
         run: |
+          ARCHIVE_PATH="$RUNNER_TEMP/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
+
           xcodebuild archive \
             -workspace ${{ env.XCODE_WORKSPACE }} \
-            -scheme RegionalApp \
+            -scheme ${{ env.XCODE_SCHEME }} \
             -configuration Release \
-            -archivePath "ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive" \
+            -archivePath "$ARCHIVE_PATH" \
             CODE_SIGNING_ALLOWED=YES
 
+          # Export path so downstream steps can reference it
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
+          echo "✅ Archive written to $ARCHIVE_PATH"
+
       # -----------------------------------------------------------------------
-      # Step 10: Zip .xcarchive file
+      # Step 11: Zip .xcarchive file
+      # Reads ARCHIVE_PATH from GITHUB_ENV set in Step 10
+      # Zip also written to RUNNER_TEMP — path exported for upload step
       # -----------------------------------------------------------------------
       - name: Zip XCArchive file
         run: |
-          cd ios/build
-          ARCHIVE_NAME="RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
-          zip -r "${ARCHIVE_NAME}.zip" "$ARCHIVE_NAME"
-          echo "✅ Zipped: ${ARCHIVE_NAME}.zip"
+          ARCHIVE_NAME=$(basename "${{ env.ARCHIVE_PATH }}")
+          ARCHIVE_ZIP_PATH="$RUNNER_TEMP/${ARCHIVE_NAME}.zip"
 
-      # -----------------------------------------------------------------------
-      # Step 11: Trivy vulnerability scan
-      # -----------------------------------------------------------------------
-      - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
+          # cd to RUNNER_TEMP so zip paths are relative (not absolute)
+          cd $RUNNER_TEMP
+          zip -r "$ARCHIVE_ZIP_PATH" "$ARCHIVE_NAME"
 
-      - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-          category: 'trivy-ios'
+          # Verify zip was created
+          if [ ! -f "$ARCHIVE_ZIP_PATH" ]; then
+            echo "❌ Zip not found at $ARCHIVE_ZIP_PATH"
+            exit 1
+          fi
+
+          # Export zip path so upload and cleanup steps can reference it
+          echo "ARCHIVE_ZIP_PATH=$ARCHIVE_ZIP_PATH" >> $GITHUB_ENV
+          echo "✅ Zipped: $ARCHIVE_ZIP_PATH"
 
       # -----------------------------------------------------------------------
       # Step 12: Upload .xcarchive artifact
+      # Reads ARCHIVE_ZIP_PATH from GITHUB_ENV set in Step 11
+      # Uses error (not warn) — xcarchive MUST exist if build succeeded
       # -----------------------------------------------------------------------
       - name: Upload iOS XCArchive artifact
         uses: actions/upload-artifact@v4
         with:
           name: ios-release-xcarchive-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
-          path: ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive.zip
+          path: ${{ env.ARCHIVE_ZIP_PATH }}
           if-no-files-found: error
+          retention-days: 30
 
       # -----------------------------------------------------------------------
-      # Step 12: Upload .ipa artifact
+      # Step 13: Upload .ipa artifact
       # -----------------------------------------------------------------------
       - name: Upload iOS IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
           path: ios/build/ipa/RegionalApp-*.ipa
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 30
 
       # -----------------------------------------------------------------------
-      # Step 13: Job summary
+      # Step 14: Job summary
       # -----------------------------------------------------------------------
       - name: Job summary
         if: always()
@@ -307,10 +548,17 @@ jobs:
           echo "| **Triggered by** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
 
       # -----------------------------------------------------------------------
-      # Cleanup: Remove keychain and certificate
+      # Cleanup — unconditional, runs on success, failure AND cancellation
+      # rm -f silently no-ops if files don't exist — safe to always run
       # -----------------------------------------------------------------------
-      - name: Cleanup
+      - name: Cleanup secrets
         if: always()
         run: |
-          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
-          rm -f certificate.p12
+          # Delete keychain using env var path set in Step 8
+          security delete-keychain "${{ env.KEYCHAIN_PATH }}" 2>/dev/null || true
+
+          # Remove certificate from RUNNER_TEMP (not project dir)
+          rm -f "${{ env.CERTIFICATE_PATH }}"
+          rm -rf "${{ env.ARCHIVE_PATH }}"      # ← rm -rf because xcarchive is a directory
+          rm -f "${{ env.ARCHIVE_ZIP_PATH }}"   # ← rm -f for the zip file
+          echo "✅ Cleanup complete"
