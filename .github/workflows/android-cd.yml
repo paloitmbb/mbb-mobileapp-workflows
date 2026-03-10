@@ -196,19 +196,12 @@ jobs:
 
       - name: Verify downloaded artifacts
         run: |
-          AAB_COUNT=$(find artifacts/aab -name "*.aab" 2>/dev/null | wc -l)
           APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
-
-          if [ "$AAB_COUNT" -eq 0 ]; then
-            echo "❌ No AAB files found — download may have failed"
-            exit 1
-          fi
           if [ "$APK_COUNT" -eq 0 ]; then
             echo "❌ No APK files found — download may have failed"
             exit 1
           fi
-
-          echo "✅ Found $AAB_COUNT AAB file(s) and $APK_COUNT APK file(s)"
+          echo "✅ Found $APK_COUNT APK file(s)"
 
       - name: Create service account key
         run: |
@@ -263,7 +256,7 @@ jobs:
   deploy-uat:
     name: Deploy to UAT (Closed Testing)
     runs-on: ubuntu-latest
-    needs: [resolve, deploy-sit]                                                                                                                                                                                                                                                                                          
+    needs: [resolve, deploy-sit]
     timeout-minutes: 30
     environment:
       name: android-UAT
@@ -389,12 +382,18 @@ jobs:
 
       - name: Verify downloaded artifacts
         run: |
+          AAB_COUNT=$(find artifacts/aab -name "*.aab" 2>/dev/null | wc -l)
           APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
+
+          if [ "$AAB_COUNT" -eq 0 ]; then
+            echo "❌ No AAB files found — download may have failed"
+            exit 1
+          fi
           if [ "$APK_COUNT" -eq 0 ]; then
             echo "❌ No APK files found — download may have failed"
             exit 1
           fi
-          echo "✅ Found $APK_COUNT APK file(s)"
+          echo "✅ Found $AAB_COUNT AAB file(s) and $APK_COUNT APK file(s)"
 
       - name: Create service account key
         run: |
@@ -441,7 +440,7 @@ jobs:
             ### Release Notes
             ${{ needs.resolve.outputs.release_notes }}
           files: |
-            artifacts/apk/*.aab
+            artifacts/aab/*.aab
             artifacts/apk/*.apk
           draft: false
           prerelease: false
