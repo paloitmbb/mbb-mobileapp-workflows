@@ -188,7 +188,7 @@ jobs:
         run: chmod +x android/gradlew
 
       - name: Run Gradle lint
-        run: cd android && ./gradlew lint
+        run: cd android && ./gradlew lint --parallel --build-cache
 
       - name: Upload lint report
         uses: actions/upload-artifact@v4
@@ -271,7 +271,7 @@ jobs:
         run: chmod +x android/gradlew
 
       - name: Run Android unit tests
-        run: cd android && ./gradlew test
+        run: cd android && ./gradlew test --parallel --build-cache
 
       - name: Upload Android test results
         uses: actions/upload-artifact@v4

@@ -200,6 +200,7 @@ jobs:
             -scheme ${{ env.XCODE_SCHEME }} \
             -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \
+            -parallelizeTargets \
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty || true
   #------------------------------------------------------------------------------
@@ -279,6 +280,7 @@ jobs:
             -scheme ${{ env.XCODE_SCHEME }} \
             -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
             -configuration Debug \
+            -parallelizeTargets \
             CODE_SIGNING_ALLOWED=NO \
             -resultBundlePath $RUNNER_TEMP/TestResults.xcresult
 
@@ -336,7 +338,7 @@ jobs:
   # Job 3: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build iOS 
+    name: Build iOS (Debug)
     runs-on: macos-latest
     needs: [install, lint-js, lint-ios, test-ios, test-js]  # ← waits for all quality gate jobs
     timeout-minutes: 60
@@ -395,138 +397,172 @@ jobs:
           cd ios && pod install
 
       # -----------------------------------------------------------------------
-      # Step 7: Setup iOS certificate — decoded to RUNNER_TEMP (never project dir)
+      # Step 7: [COMMENTED - Uncomment when secrets are configured]
+      # Setup iOS certificate — decoded to RUNNER_TEMP (never project dir)
       # Passwords masked before any operations to prevent log exposure
       # -----------------------------------------------------------------------
-      - name: Setup iOS certificate
-        run: |
-          # Mask passwords so they never appear in any log output
-          echo "::add-mask::${{ secrets.IOS_CERTIFICATE_PASSWORD }}"
-          echo "::add-mask::${{ secrets.KEYCHAIN_PASSWORD }}"
-
-          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
-
-          # Decode to RUNNER_TEMP — never to project directory
-          echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > "$CERTIFICATE_PATH"
-
-          # Verify file was written correctly
-          if [ ! -f "$CERTIFICATE_PATH" ]; then
-            echo "❌ Certificate not found at $CERTIFICATE_PATH"
-            exit 1
-          fi
-
-          # Export path so downstream steps (keychain + cleanup) can reference it
-          echo "CERTIFICATE_PATH=$CERTIFICATE_PATH" >> $GITHUB_ENV
-          echo "✅ Certificate decoded to $CERTIFICATE_PATH"
+      # - name: Setup iOS certificate
+      #   run: |
+      #     # Mask passwords so they never appear in any log output
+      #     echo "::add-mask::${{ secrets.IOS_CERTIFICATE_PASSWORD }}"
+      #     echo "::add-mask::${{ secrets.KEYCHAIN_PASSWORD }}"
+      #
+      #     CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+      #
+      #     # Decode to RUNNER_TEMP — never to project directory
+      #     echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > "$CERTIFICATE_PATH"
+      #
+      #     # Verify file was written correctly
+      #     if [ ! -f "$CERTIFICATE_PATH" ]; then
+      #       echo "❌ Certificate not found at $CERTIFICATE_PATH"
+      #       exit 1
+      #     fi
+      #
+      #     # Export path so downstream steps (keychain + cleanup) can reference it
+      #     echo "CERTIFICATE_PATH=$CERTIFICATE_PATH" >> $GITHUB_ENV
+      #     echo "✅ Certificate decoded to $CERTIFICATE_PATH"
       # -----------------------------------------------------------------------
-      # Step 8: Install provisioning profile
+      # Step 8: [COMMENTED - Uncomment when secrets are configured]
+      # Install provisioning profile
       # -----------------------------------------------------------------------
-      - name: Install provisioning profile
-        run: |
-          # Decode provisioning profile from base64
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
-
-          echo "✅ Provisioning profile installed"
+      # - name: Install provisioning profile
+      #   run: |
+      #     # Decode provisioning profile from base64
+      #     mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+      #     echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
+      #
+      #     echo "✅ Provisioning profile installed"
 
       # -----------------------------------------------------------------------
-      # Step 9: Create temporary Xcode keychain
+      # Step 9: [COMMENTED - Uncomment when secrets are configured]
+      # Create temporary Xcode keychain
       # Certificate imported from RUNNER_TEMP via CERTIFICATE_PATH env var
       # set in Step 7 — never references project directory
       # -----------------------------------------------------------------------
-      - name: Create Xcode keychain
-        run: |
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-
-          # Create temporary keychain
-          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
-
-          # Import certificate from RUNNER_TEMP (not project directory)
-          security import "${{ env.CERTIFICATE_PATH }}" \
-            -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
-
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -k "${{ secrets.KEYCHAIN_PASSWORD }}" \
-            "$KEYCHAIN_PATH"
-
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          # Export keychain path for cleanup step
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
-          echo "✅ Keychain created and certificate imported from RUNNER_TEMP"
+      # - name: Create Xcode keychain
+      #   run: |
+      #     KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+      #
+      #     # Create temporary keychain
+      #     security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+      #     security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+      #     security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+      #
+      #     # Import certificate from RUNNER_TEMP (not project directory)
+      #     security import "${{ env.CERTIFICATE_PATH }}" \
+      #       -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" \
+      #       -A -t cert -f pkcs12 \
+      #       -k "$KEYCHAIN_PATH"
+      #
+      #     security set-key-partition-list \
+      #       -S apple-tool:,apple: \
+      #       -k "${{ secrets.KEYCHAIN_PASSWORD }}" \
+      #       "$KEYCHAIN_PATH"
+      #
+      #     security list-keychain -d user -s "$KEYCHAIN_PATH"
+      #
+      #     # Export keychain path for cleanup step
+      #     echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+      #     echo "✅ Keychain created and certificate imported from RUNNER_TEMP"
 
       # -----------------------------------------------------------------------
+      # Step 10: Build iOS app (Debug) - no signing required
+      # -----------------------------------------------------------------------
+      - name: Build iOS app (Debug)
+        run: |
+          xcodebuild build \
+            -workspace ${{ env.XCODE_WORKSPACE }} \
+            -scheme ${{ env.XCODE_SCHEME }} \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath $RUNNER_TEMP/DerivedData \
+            -parallelizeTargets \
+            CODE_SIGNING_ALLOWED=NO
+
+          echo "✅ Debug build complete"
+
+      # -----------------------------------------------------------------------
+      # [COMMENTED - Uncomment when signing secrets are configured]
       # Step 10: Build iOS app (Release)
       # Archive written to RUNNER_TEMP — never to project directory
       # Path exported to GITHUB_ENV so zip and upload steps can reference it
       # -----------------------------------------------------------------------
-      - name: Build iOS app (Release)
-        run: |
-          ARCHIVE_PATH="$RUNNER_TEMP/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
-
-          xcodebuild archive \
-            -workspace ${{ env.XCODE_WORKSPACE }} \
-            -scheme ${{ env.XCODE_SCHEME }} \
-            -configuration Release \
-            -archivePath "$ARCHIVE_PATH" \
-            CODE_SIGNING_ALLOWED=YES
-
-          # Export path so downstream steps can reference it
-          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
-          echo "✅ Archive written to $ARCHIVE_PATH"
+      # - name: Build iOS app (Release)
+      #   run: |
+      #     ARCHIVE_PATH="$RUNNER_TEMP/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
+      #
+      #     xcodebuild archive \
+      #       -workspace ${{ env.XCODE_WORKSPACE }} \
+      #       -scheme ${{ env.XCODE_SCHEME }} \
+      #       -configuration Release \
+      #       -archivePath "$ARCHIVE_PATH" \
+      #       CODE_SIGNING_ALLOWED=YES
+      #
+      #     # Export path so downstream steps can reference it
+      #     echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
+      #     echo "✅ Archive written to $ARCHIVE_PATH"
 
       # -----------------------------------------------------------------------
+      # [COMMENTED - Uncomment when signing secrets are configured]
       # Step 11: Zip .xcarchive file
       # Reads ARCHIVE_PATH from GITHUB_ENV set in Step 10
       # Zip also written to RUNNER_TEMP — path exported for upload step
       # -----------------------------------------------------------------------
-      - name: Zip XCArchive file
-        run: |
-          ARCHIVE_NAME=$(basename "${{ env.ARCHIVE_PATH }}")
-          ARCHIVE_ZIP_PATH="$RUNNER_TEMP/${ARCHIVE_NAME}.zip"
-
-          # cd to RUNNER_TEMP so zip paths are relative (not absolute)
-          cd $RUNNER_TEMP
-          zip -r "$ARCHIVE_ZIP_PATH" "$ARCHIVE_NAME"
-
-          # Verify zip was created
-          if [ ! -f "$ARCHIVE_ZIP_PATH" ]; then
-            echo "❌ Zip not found at $ARCHIVE_ZIP_PATH"
-            exit 1
-          fi
-
-          # Export zip path so upload and cleanup steps can reference it
-          echo "ARCHIVE_ZIP_PATH=$ARCHIVE_ZIP_PATH" >> $GITHUB_ENV
-          echo "✅ Zipped: $ARCHIVE_ZIP_PATH"
+      # - name: Zip XCArchive file
+      #   run: |
+      #     ARCHIVE_NAME=$(basename "${{ env.ARCHIVE_PATH }}")
+      #     ARCHIVE_ZIP_PATH="$RUNNER_TEMP/${ARCHIVE_NAME}.zip"
+      #
+      #     # cd to RUNNER_TEMP so zip paths are relative (not absolute)
+      #     cd $RUNNER_TEMP
+      #     zip -r "$ARCHIVE_ZIP_PATH" "$ARCHIVE_NAME"
+      #
+      #     # Verify zip was created
+      #     if [ ! -f "$ARCHIVE_ZIP_PATH" ]; then
+      #       echo "❌ Zip not found at $ARCHIVE_ZIP_PATH"
+      #       exit 1
+      #     fi
+      #
+      #     # Export zip path so upload and cleanup steps can reference it
+      #     echo "ARCHIVE_ZIP_PATH=$ARCHIVE_ZIP_PATH" >> $GITHUB_ENV
+      #     echo "✅ Zipped: $ARCHIVE_ZIP_PATH"
 
       # -----------------------------------------------------------------------
+      # Step 11: Upload debug build artifact (simulator app)
+      # -----------------------------------------------------------------------
+      - name: Upload iOS Debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-debug-app-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
+          path: ${{ runner.temp }}/DerivedData/Build/Products/Debug-iphonesimulator/*.app
+          if-no-files-found: warn
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # [COMMENTED - Uncomment when signing secrets are configured]
       # Step 12: Upload .xcarchive artifact
       # Reads ARCHIVE_ZIP_PATH from GITHUB_ENV set in Step 11
       # Uses error (not warn) — xcarchive MUST exist if build succeeded
       # -----------------------------------------------------------------------
-      - name: Upload iOS XCArchive artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-release-xcarchive-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
-          path: ${{ env.ARCHIVE_ZIP_PATH }}
-          if-no-files-found: error
-          retention-days: 30
+      # - name: Upload iOS XCArchive artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ios-release-xcarchive-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
+      #     path: ${{ env.ARCHIVE_ZIP_PATH }}
+      #     if-no-files-found: error
+      #     retention-days: 30
 
       # -----------------------------------------------------------------------
+      # [COMMENTED - Uncomment when signing secrets are configured]
       # Step 13: Upload .ipa artifact
       # -----------------------------------------------------------------------
-      - name: Upload iOS IPA artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
-          path: ios/build/ipa/RegionalApp-*.ipa
-          if-no-files-found: warn
-          retention-days: 30
+      # - name: Upload iOS IPA artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
+      #     path: ios/build/ipa/RegionalApp-*.ipa
+      #     if-no-files-found: warn
+      #     retention-days: 30
 
       # -----------------------------------------------------------------------
       # Step 14: Job summary
@@ -539,7 +575,7 @@ jobs:
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **App** | RegionalApp (iOS) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Build Type** | Release |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | Debug |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
@@ -551,14 +587,14 @@ jobs:
       # Cleanup — unconditional, runs on success, failure AND cancellation
       # rm -f silently no-ops if files don't exist — safe to always run
       # -----------------------------------------------------------------------
-      - name: Cleanup secrets
+      - name: Cleanup
         if: always()
         run: |
-          # Delete keychain using env var path set in Step 8
-          security delete-keychain "${{ env.KEYCHAIN_PATH }}" 2>/dev/null || true
-
-          # Remove certificate from RUNNER_TEMP (not project dir)
-          rm -f "${{ env.CERTIFICATE_PATH }}"
-          rm -rf "${{ env.ARCHIVE_PATH }}"      # ← rm -rf because xcarchive is a directory
-          rm -f "${{ env.ARCHIVE_ZIP_PATH }}"   # ← rm -f for the zip file
+          # Remove DerivedData from debug build
+          rm -rf "$RUNNER_TEMP/DerivedData"
+          # Uncomment below when signing secrets are configured
+          # security delete-keychain "${{ env.KEYCHAIN_PATH }}" 2>/dev/null || true
+          # rm -f "${{ env.CERTIFICATE_PATH }}"
+          # rm -rf "${{ env.ARCHIVE_PATH }}"
+          # rm -f "${{ env.ARCHIVE_ZIP_PATH }}"
           echo "✅ Cleanup complete"

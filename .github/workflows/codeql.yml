@@ -1,18 +1,18 @@
 # =============================================================================
-# CodeQL Analysis — {{REPO_NAME}} (React Native)
+# CodeQL Analysis — React Native
 # =============================================================================
 # SAST via GitHub CodeQL — runs on every PR, every push to main/sit,
 # and on a weekly schedule. Results surface in:
 #   GitHub → Security → Code scanning
 #
-# Language: javascript-typescript  (covers .js, .mjs, .cjs, .ts, .tsx, .jsx)
-# Coverage: security-extended queries  →  OWASP Top 10 + CWE beyond defaults
-#           security-and-quality queries  →  maintainability + reliability
-#
-# Note: JavaScript/TypeScript are interpreted — no build step is required.
-#       CodeQL analyses the source directly.
+# Languages: javascript-typescript  (covers .js, .mjs, .cjs, .ts, .tsx, .jsx)
+#            java-kotlin            (covers Android .java and .kt source)
+#            swift                  (covers iOS .swift and .m source)
+# Note: JavaScript/TypeScript are interpreted — no build step required.
+#       Java/Kotlin and Swift are compiled — build steps required.
+#       Swift analysis requires macos-latest runner.
 # =============================================================================
-name: CodeQL Analysis
+name: CodeQL Analysis 
 
 on:
   pull_request:
@@ -41,7 +41,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
 
     strategy:
@@ -49,12 +49,20 @@ jobs:
       matrix:
         language:
           - javascript-typescript
-          - java-kotlin 
+          - java-kotlin
+          - swift
+
+        include:
+          - language: swift
+            runner: macos-latest    # ← Swift must run on macOS
+          - language: javascript-typescript
+            runner: ubuntu-latest   # ← JS can run on Linux (cheaper)
+          - language: java-kotlin
+            runner: ubuntu-latest 
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
       # Initialize CodeQL database and inject security query suites.
       # No explicit build step needed for JavaScript / TypeScript —
       # CodeQL performs its own extraction pass over the source files.
@@ -73,7 +81,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Setup Java (for java-kotlin analysis)
         if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4@3a4f6e1234567890abcdef...    # v4@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  #v4
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -98,6 +106,32 @@ jobs:
             --no-daemon \
             -x lint \
             -x test
+
+      # -----------------------------------------------------------------------
+      # Build steps required for swift language only
+      # Runs on macos-latest — handled by matrix.runner override
+      # CodeQL traces the Xcode build to understand Swift/ObjC source
+      # -----------------------------------------------------------------------
+      - name: Setup Ruby (for CocoaPods)
+        if: matrix.language == 'swift'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: Install CocoaPods
+        if: matrix.language == 'swift'
+        run: cd ios && pod install
+
+      - name: Build iOS for CodeQL
+        if: matrix.language == 'swift'
+        run: |
+          xcodebuild build \
+            -workspace ios/RegionalApp.xcworkspace \
+            -scheme RegionalApp \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.32.5
@@ -124,7 +158,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write    # Post Dependency Review comments
-      contents: read           # Allows workflow to clone repository
+      contents: read          # Allows workflow to clone repository
+      actions: read           # Required by Dependency Review Action
     timeout-minutes: 15
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
 
