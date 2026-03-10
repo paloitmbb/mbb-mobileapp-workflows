@@ -1,15 +1,14 @@
-const app = require('./index');
+import React from 'react';
+import { render } from '@testing-library/react-native';
+import App from './App';
 
 describe('MBB Mobile App', () => {
-  test('app module exports correctly', () => {
-    expect(app).toBeDefined();
+  test('App renders without crashing', () => {
+    const { toJSON } = render(<App />);
+    expect(toJSON()).toBeTruthy();
   });
 
-  test('app has route handlers', () => {
-    const routes = app._router.stack
-      .filter(r => r.route)
-      .map(r => r.route.path);
-    expect(routes).toContain('/');
-    expect(routes).toContain('/health');
+  test('App component is defined', () => {
+    expect(App).toBeDefined();
   });
 });
