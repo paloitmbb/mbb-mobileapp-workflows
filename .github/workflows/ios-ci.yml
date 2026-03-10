@@ -361,7 +361,7 @@ jobs:
   build:
     name: Build iOS (Debug)
     runs-on: macos-latest
-    needs: [install, lint-js, lint-ios, test-ios, test-js]  # ← waits for all quality gate jobs
+    needs: [install, lint-js, lint-ios, test-js]  # ← test-ios excluded until test target exists
     timeout-minutes: 60
     env:
       APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}
