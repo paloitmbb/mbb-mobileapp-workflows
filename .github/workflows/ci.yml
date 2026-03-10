@@ -1,0 +1,517 @@
+# ──────────────────────────────────────────────────────────────
+# RegionalApp — Combined CI Pipeline
+#
+# PR to main/sit  →  Quality Gate (CodeQL + Unit Tests + Secret Scan)
+#                     Must pass before merge is allowed.
+#
+# Push to main/sit →  Build Pipeline (Install deps → Gradle build
+#                     → Trivy scan → Upload artifact via EAS)
+# ──────────────────────────────────────────────────────────────
+name: "CI Pipeline"
+
+on:
+  pull_request:
+    branches: [main, sit]
+  push:
+    branches: [main, sit]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+  JAVA_VERSION: "17"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+# ================================================================
+# JOBS
+# ================================================================
+jobs:
+
+  # ════════════════════════════════════════════════════════════════
+  # PHASE 1 — QUALITY GATE  (runs on Pull Request only)
+  # Blocks merge until CodeQL, unit tests, and secret scan pass.
+  # ════════════════════════════════════════════════════════════════
+
+  # ── 1a. CodeQL Static Analysis ──────────────────────────────
+  codeql:
+    name: "CodeQL Analysis"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["javascript-typescript"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # ── 1b. Unit Tests (Jest) ───────────────────────────────────
+  unit-tests:
+    name: "Unit Tests"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run Jest unit tests
+        run: npm test
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage/
+          retention-days: 14
+
+  # ── 1c. Trivy Secret & Vulnerability Scan ───────────────────
+  secret-scan:
+    name: "Secret & Vulnerability Scan"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy secret & vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          scanners: "vuln,secret,misconfig"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          format: "sarif"
+          output: "trivy-pr-report.sarif"
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-pr-report.sarif"
+          category: "trivy-pr-scan"
+
+      - name: Upload Trivy report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-pr-report-${{ github.sha }}
+          path: trivy-pr-report.sarif
+          retention-days: 30
+
+  # ── Quality Gate Summary ────────────────────────────────────
+  quality-gate:
+    name: "Quality Gate"
+    if: github.event_name == 'pull_request'
+    needs: [codeql, unit-tests, secret-scan]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Quality gate summary
+        run: |
+          echo "## Quality Gate — PR Check Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CodeQL Analysis | ${{ needs.codeql.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit Tests (Jest) | ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret & Vuln Scan | ${{ needs.secret-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All checks must pass before this PR can be merged." >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════
+  # PHASE 2 — BUILD & UPLOAD  (runs on Push / Merge only)
+  # After merge, install deps, build Android (Gradle), build iOS,
+  # run Trivy scan, then upload artifacts via EAS.
+  # ════════════════════════════════════════════════════════════════
+
+  # ── 2a. Android Build ───────────────────────────────────────
+  build-android:
+    name: "Build Android (AAB + APK)"
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── Setup ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Java JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # ── App version ──────────────────────────────────────────
+      - name: Check app version
+        id: version
+        run: |
+          VERSION_NAME=$(grep 'versionName' android/app/build.gradle | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VERSION_CODE=$(grep 'versionCode' android/app/build.gradle | head -1 | awk '{print $2}')
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "App version: $VERSION_NAME ($VERSION_CODE)"
+
+      # ── Android environment ──────────────────────────────────
+      - name: Create local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+
+      - name: Create google-services.json from base64
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
+          echo "✅ google-services.json created"
+
+      - name: Verify google-services.json exists
+        run: test -f android/app/google-services.json || { echo "❌ google-services.json not found"; exit 1; }
+
+      - name: Create Android keystore from base64
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.jks
+          echo "✅ Keystore created"
+        env:
+          MYAPP_UPLOAD_STORE_FILE: release.jks
+          MYAPP_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MYAPP_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MYAPP_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Verify Android keystore exists
+        run: test -f android/app/release.jks || { echo "❌ Keystore not found"; exit 1; }
+
+      - name: Install Android SDK components
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;25.2.9519653" \
+            --channel=0
+
+      - name: Verify NDK source.properties
+        run: test -f "$ANDROID_SDK_ROOT/ndk/25.2.9519653/source.properties" && echo "✅ NDK verified" || echo "⚠️ NDK source.properties not found"
+
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      # ── Build ────────────────────────────────────────────────
+      - name: Build Android AAB (Production)
+        run: cd android && ./gradlew bundleRelease
+        env:
+          MYAPP_UPLOAD_STORE_FILE: release.jks
+          MYAPP_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MYAPP_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MYAPP_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Build Android APK (Production)
+        run: cd android && ./gradlew assembleRelease
+        env:
+          MYAPP_UPLOAD_STORE_FILE: release.jks
+          MYAPP_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MYAPP_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MYAPP_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      # ── Trivy scan (before upload) ──────────────────────────
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          scanners: "vuln,secret,misconfig"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          format: "sarif"
+          output: "trivy-report-android.sarif"
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-report-android.sarif"
+          category: "trivy-android"
+
+      - name: Upload Trivy report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-android-${{ github.sha }}
+          path: trivy-report-android.sarif
+          retention-days: 30
+
+      # ── Upload artifacts (blocked if Trivy fails) ───────────
+      - name: Upload Android AAB artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regionalapp-android-aab-${{ steps.version.outputs.VERSION_NAME }}-${{ github.sha }}
+          path: android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Android APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regionalapp-android-apk-${{ steps.version.outputs.VERSION_NAME }}-${{ github.sha }}
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── EAS Upload (Expo image) ─────────────────────────────
+      - name: Install EAS CLI
+        if: success()
+        run: npm install -g eas-cli
+
+      - name: Upload to EAS (Expo)
+        if: success()
+        run: |
+          eas build \
+            --platform android \
+            --profile production \
+            --non-interactive \
+            --wait
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Android Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Platform** | Android |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ steps.version.outputs.VERSION_NAME }} (${{ steps.version.outputs.VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Trivy** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ── 2b. iOS Build ──────────────────────────────────────────
+  build-ios:
+    name: "Build iOS (IPA)"
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── Setup ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+
+      - name: Install CocoaPods
+        run: cd ios && pod install
+
+      # ── iOS signing ─────────────────────────────────────────
+      - name: Install iOS certificate
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > $CERTIFICATE_PATH
+
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+
+          security import $CERTIFICATE_PATH -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "${{ secrets.KEYCHAIN_PASSWORD }}" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Install provisioning profile
+        run: |
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > $PP_PATH
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      # ── Build ────────────────────────────────────────────────
+      - name: Check app version
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" ios/RegionalApp/Info.plist 2>/dev/null || echo "1.0.0")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" ios/RegionalApp/Info.plist 2>/dev/null || echo "1")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD=$BUILD" >> $GITHUB_OUTPUT
+          echo "App version: $VERSION ($BUILD)"
+
+      - name: Build iOS app
+        run: npm run build:ios:release:staging:appstore
+
+      # ── Trivy scan (before upload) ──────────────────────────
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          scanners: "vuln,secret,misconfig"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          format: "sarif"
+          output: "trivy-report-ios.sarif"
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-report-ios.sarif"
+          category: "trivy-ios"
+
+      - name: Upload Trivy report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-ios-${{ github.sha }}
+          path: trivy-report-ios.sarif
+          retention-days: 30
+
+      # ── Upload artifacts (blocked if Trivy fails) ───────────
+      - name: Upload iOS build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regionalapp-ios-${{ steps.version.outputs.VERSION }}-${{ github.sha }}
+          path: |
+            ios/build/**/*.ipa
+            ios/build/**/*.xcarchive
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ── EAS Upload (Expo image) ─────────────────────────────
+      - name: Install EAS CLI
+        if: success()
+        run: npm install -g eas-cli
+
+      - name: Upload to EAS (Expo)
+        if: success()
+        run: |
+          eas build \
+            --platform ios \
+            --profile production \
+            --non-interactive \
+            --wait
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      # ── Cleanup keychain ────────────────────────────────────
+      - name: Cleanup signing
+        if: always()
+        run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## iOS Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Platform** | iOS |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ steps.version.outputs.VERSION }} (${{ steps.version.outputs.BUILD }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Trivy** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════
+  # NOTIFY — Final status (runs after all jobs)
+  # ════════════════════════════════════════════════════════════════
+  notify:
+    name: "Notify"
+    if: always()
+    needs: [codeql, unit-tests, secret-scan, quality-gate, build-android, build-ios]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pipeline summary
+        run: |
+          echo "## CI Pipeline — Final Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "### Quality Gate (PR Checks)" >> $GITHUB_STEP_SUMMARY
+            echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| CodeQL | ${{ needs.codeql.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Unit Tests | ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Secret Scan | ${{ needs.secret-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Build & Upload (Post-Merge)" >> $GITHUB_STEP_SUMMARY
+            echo "| Job | Result |" >> $GITHUB_STEP_SUMMARY
+            echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Android Build | ${{ needs.build-android.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| iOS Build | ${{ needs.build-ios.result }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY

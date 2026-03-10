@@ -2,18 +2,22 @@
 # MBB Mobile App - Android CD Workflow (React Native)
 # =============================================================================
 # This workflow deploys the Android RegionalApp to Google Play Store.
-# It downloads artifacts built by the Android CI pipeline and publishes
-# them to the appropriate Play Store track.
+# It downloads the SAME release artifacts built by the Android CI pipeline
+# and promotes them through 3 environments:
 #
-# Trigger: Manual dispatch (after a successful CI run).
+#   SIT (auto) → UAT (approval required) → Production (approval required)
 #
-# Job Flow:
-#   Job 1: Deploy to Google Play (downloads CI artifacts → publishes)
+# Trigger:
+#   - Automatic: When Android CI succeeds on the main branch
+#   - Manual: workflow_dispatch (re-deploy or ad-hoc)
 #
-# Environments:
-#   - SIT        → Internal testing track (APK-based distribution)
-#   - Staging    → Closed testing / Alpha track
-#   - Production → Production track (AAB required)
+# Build Once, Deploy Many:
+#   All 3 environments use the SAME CI artifacts (matched by SHA).
+#   No rebuilding occurs in CD.
+#
+# Approval Gates:
+#   UAT and Production require approval via GitHub Environment Protection Rules.
+#   Configure in: Settings → Environments → android-UAT / android-Production
 #
 # Required Secrets:
 #   - GOOGLE_PLAY_SERVICE_ACCOUNT_JSON  (Play Store API service account)
@@ -23,33 +27,22 @@ name: Android CD - RegionalApp
 
 on:
   # ---------------------------------------------------------------------------
-  # Manual trigger — run after a successful Android CI build
+  # Auto-trigger: When Android CI succeeds on main branch
+  # ---------------------------------------------------------------------------
+  workflow_run:
+    workflows: ["Android CI - RegionalApp"]
+    types: [completed]
+    branches: [main]
+
+  # ---------------------------------------------------------------------------
+  # Manual trigger: Re-deploy or ad-hoc deployment
   # ---------------------------------------------------------------------------
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Environment used in the CI build'
-        required: true
-        type: choice
-        options:
-          - SIT
-          - Staging
-          - Production
-        default: 'Staging'
       ci_run_id:
-        description: 'CI workflow run ID to download artifacts from (leave empty for latest)'
-        required: false
-        type: string
-      play_store_track:
-        description: 'Google Play Store track'
+        description: 'CI workflow run ID to download artifacts from'
         required: true
-        type: choice
-        options:
-          - internal
-          - alpha
-          - beta
-          - production
-        default: 'internal'
+        type: string
       app_version_name:
         description: 'App version name (e.g. 1.0.0) — must match the CI build'
         required: true
@@ -60,6 +53,10 @@ on:
         required: true
         type: string
         default: '1'
+      commit_sha:
+        description: 'Full commit SHA from the CI build — must match the CI artifact tag'
+        required: true
+        type: string
       release_notes:
         description: 'Release notes for this version'
         required: false
@@ -71,126 +68,266 @@ permissions:
   actions: read           # For downloading artifacts from CI runs
 
 # ---------------------------------------------------------------------------
-# Environment variables
-# ---------------------------------------------------------------------------
-env:
-  ENVIRONMENT: ${{ github.event.inputs.environment }}
-  PLAY_STORE_TRACK: ${{ github.event.inputs.play_store_track }}
-  APP_VERSION_NAME: ${{ github.event.inputs.app_version_name }}
-  APP_VERSION_CODE: ${{ github.event.inputs.app_version_code }}
-
-# ---------------------------------------------------------------------------
-# Concurrency - prevent duplicate deployments to the same environment
+# Concurrency - only one CD pipeline at a time
 # ---------------------------------------------------------------------------
 concurrency:
-  group: android-cd-${{ github.event.inputs.environment }}
+  group: android-cd
   cancel-in-progress: false
 
 jobs:
   # ===========================================================================
-  # Job 1: Deploy - Download CI artifacts and publish to Google Play Store
+  # Pre-flight: Resolve CI build metadata
   # ===========================================================================
-  deploy:
-    name: Deploy to Google Play (${{ github.event.inputs.environment }} → ${{ github.event.inputs.play_store_track }})
+  resolve:
+    name: Resolve CI Build Info
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment:
-      name: android-${{ github.event.inputs.environment }}
-      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      ci_run_id: ${{ steps.resolve.outputs.ci_run_id }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      app_version_name: ${{ steps.resolve.outputs.app_version_name }}
+      app_version_code: ${{ steps.resolve.outputs.app_version_code }}
+      release_notes: ${{ steps.resolve.outputs.release_notes }}
 
     steps:
-      # -----------------------------------------------------------------------
-      # Step 1: Checkout repository (for changelog / release notes)
-      # -----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -----------------------------------------------------------------------
-      # Step 2: Download APK artifact from CI
-      # -----------------------------------------------------------------------
+      - name: Resolve build metadata
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
+            echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
+            echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
+            echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
+          else
+            # Auto-triggered from CI — extract from workflow_run event
+            echo "ci_run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+
+            # Extract version from build.gradle
+            APP_VERSION_NAME=$(grep -oP 'versionName\s+"\K[^"]+' android/app/build.gradle || echo "1.0.0")
+            APP_VERSION_CODE=$(grep -oP 'versionCode\s+\K\d+' android/app/build.gradle || echo "1")
+            echo "app_version_name=$APP_VERSION_NAME" >> $GITHUB_OUTPUT
+            echo "app_version_code=$APP_VERSION_CODE" >> $GITHUB_OUTPUT
+            echo "release_notes=Bug fixes and performance improvements" >> $GITHUB_OUTPUT
+          fi
+
+          echo "📋 Resolved build info:"
+          cat $GITHUB_OUTPUT
+
+  # ===========================================================================
+  # Stage 1: Deploy to SIT (automatic — no approval needed)
+  # ===========================================================================
+  deploy-sit:
+    name: Deploy to SIT (Internal Testing)
+    runs-on: ubuntu-latest
+    needs: resolve
+    timeout-minutes: 30
+    environment:
+      name: android-SIT
+      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
+      APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download APK artifact from CI
         uses: actions/download-artifact@v4
         with:
-          name: android-${{ env.ENVIRONMENT }}-apk-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
           path: artifacts/apk
-          run-id: ${{ github.event.inputs.ci_run_id || '' }}
+          run-id: ${{ env.CI_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # -----------------------------------------------------------------------
-      # Step 3: Download AAB artifact from CI (Production only)
-      # -----------------------------------------------------------------------
-      - name: Download AAB artifact from CI
-        if: env.ENVIRONMENT == 'Production'
-        uses: actions/download-artifact@v4
-        with:
-          name: android-${{ env.ENVIRONMENT }}-aab-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
-          path: artifacts/aab
-          run-id: ${{ github.event.inputs.ci_run_id || '' }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # -----------------------------------------------------------------------
-      # Step 4: List downloaded artifacts
-      # -----------------------------------------------------------------------
       - name: List downloaded artifacts
         run: |
-          echo "📦 Downloaded artifacts:"
-          find artifacts -type f \( -name "*.aab" -o -name "*.apk" \) | while read f; do
+          echo "📦 Downloaded artifacts for SIT:"
+          find artifacts -type f -name "*.apk" | while read f; do
             echo "  - $f ($(du -h "$f" | cut -f1))"
           done
 
-      # -----------------------------------------------------------------------
-      # Step 5: Create service account key file
-      # -----------------------------------------------------------------------
       - name: Create service account key
         run: |
           echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
-          echo "✅ Service account key file created"
 
-      # -----------------------------------------------------------------------
-      # Step 6: Prepare release notes
-      # -----------------------------------------------------------------------
       - name: Prepare release notes
         run: |
-          NOTES="${{ github.event.inputs.release_notes }}"
-
           mkdir -p whatsnew
-          echo "$NOTES" > whatsnew/whatsnew-en-US
+          echo "${{ needs.resolve.outputs.release_notes }}" > whatsnew/whatsnew-en-US
 
-          echo "📝 Release notes: $NOTES"
-
-      # -----------------------------------------------------------------------
-      # Step 7: Upload to Google Play Store (Production — uses AAB)
-      # -----------------------------------------------------------------------
-      - name: Upload AAB to Google Play Store
-        if: env.ENVIRONMENT == 'Production'
-        uses: r0adkll/upload-google-play@v1
-        with:
-          serviceAccountJson: service-account.json
-          packageName: com.mbb.regionalapp
-          releaseFiles: artifacts/aab/*.aab
-          track: ${{ env.PLAY_STORE_TRACK }}
-          whatsNewDirectory: whatsnew
-          status: completed
-
-      # -----------------------------------------------------------------------
-      # Step 8: Upload to Google Play Store (SIT/Staging — uses APK)
-      # -----------------------------------------------------------------------
-      - name: Upload APK to Google Play Store
-        if: env.ENVIRONMENT != 'Production'
+      - name: Upload APK to Google Play (Internal Testing)
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJson: service-account.json
           packageName: com.mbb.regionalapp
           releaseFiles: artifacts/apk/*.apk
-          track: ${{ env.PLAY_STORE_TRACK }}
+          track: internal
           whatsNewDirectory: whatsnew
           status: completed
 
-      # -----------------------------------------------------------------------
-      # Step 9: Create GitHub Release (Production only)
-      # -----------------------------------------------------------------------
+      - name: SIT deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 Android SIT Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | SIT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Track** | Internal Testing |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: rm -f service-account.json
+
+  # ===========================================================================
+  # Stage 2: Deploy to UAT (requires approval)
+  # ===========================================================================
+  deploy-uat:
+    name: Deploy to UAT (Closed Testing)
+    runs-on: ubuntu-latest
+    needs: [resolve, deploy-sit]
+    timeout-minutes: 30
+    environment:
+      name: android-UAT
+      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
+      APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download APK artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/apk
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        run: |
+          echo "📦 Downloaded artifacts for UAT:"
+          find artifacts -type f -name "*.apk" | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Create service account key
+        run: |
+          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      - name: Prepare release notes
+        run: |
+          mkdir -p whatsnew
+          echo "${{ needs.resolve.outputs.release_notes }}" > whatsnew/whatsnew-en-US
+
+      - name: Upload APK to Google Play (Alpha / Closed Testing)
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: service-account.json
+          packageName: com.mbb.regionalapp
+          releaseFiles: artifacts/apk/*.apk
+          track: alpha
+          whatsNewDirectory: whatsnew
+          status: completed
+
+      - name: UAT deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 Android UAT Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | UAT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Track** | Alpha (Closed Testing) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: rm -f service-account.json
+
+  # ===========================================================================
+  # Stage 3: Deploy to Production (requires approval)
+  # ===========================================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [resolve, deploy-uat]
+    timeout-minutes: 30
+    environment:
+      name: android-Production
+      url: https://play.google.com/store/apps/details?id=com.mbb.regionalapp
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
+      APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download AAB artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: android-release-aab-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/aab
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download APK artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/apk
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        run: |
+          echo "📦 Downloaded artifacts for Production:"
+          find artifacts -type f \( -name "*.aab" -o -name "*.apk" \) | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Create service account key
+        run: |
+          echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      - name: Prepare release notes
+        run: |
+          mkdir -p whatsnew
+          echo "${{ needs.resolve.outputs.release_notes }}" > whatsnew/whatsnew-en-US
+
+      - name: Upload AAB to Google Play (Production)
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: service-account.json
+          packageName: com.mbb.regionalapp
+          releaseFiles: artifacts/aab/*.aab
+          track: production
+          whatsNewDirectory: whatsnew
+          status: completed
+
       - name: Create GitHub Release
-        if: env.ENVIRONMENT == 'Production'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-v${{ env.APP_VERSION_NAME }}-${{ env.APP_VERSION_CODE }}
@@ -199,43 +336,34 @@ jobs:
             ## Android Release v${{ env.APP_VERSION_NAME }}
 
             **Build:** ${{ env.APP_VERSION_CODE }}
-            **Track:** ${{ env.PLAY_STORE_TRACK }}
-            **Environment:** ${{ env.ENVIRONMENT }}
-            **Commit:** ${{ github.sha }}
+            **Commit:** ${{ env.COMMIT_SHA }}
+
+            ### Promotion Path
+            SIT ✅ → UAT ✅ → Production ✅
 
             ### Release Notes
-            ${{ github.event.inputs.release_notes }}
+            ${{ needs.resolve.outputs.release_notes }}
           files: |
             artifacts/apk/*.apk
           draft: false
-          prerelease: ${{ env.PLAY_STORE_TRACK != 'production' }}
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # -----------------------------------------------------------------------
-      # Step 10: Deployment summary
-      # -----------------------------------------------------------------------
-      - name: Deployment summary
+      - name: Production deployment summary
         if: always()
         run: |
-          echo "## 🚀 Android CD Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Android Production Deployment" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **App** | RegionalApp (Android) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | Production |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Track** | Production |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Play Store Track** | ${{ env.PLAY_STORE_TRACK }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **CI Run ID** | ${{ github.event.inputs.ci_run_id || 'latest' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Triggered by** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GitHub Release** | android-v${{ env.APP_VERSION_NAME }}-${{ env.APP_VERSION_CODE }} |" >> $GITHUB_STEP_SUMMARY
 
-      # -----------------------------------------------------------------------
-      # Cleanup
-      # -----------------------------------------------------------------------
       - name: Cleanup
         if: always()
-        run: |
-          rm -f service-account.json
+        run: rm -f service-account.json
