@@ -6,8 +6,7 @@
 # Trigger: workflow_dispatch (manual) with environment selection.
 #
 # Job Flow:
-#   Job 1: Install  →  Job 2: Scan           ──→  Job 4: Build iOS
-#                   →  Job 3: Test           ──┘
+#   Job 1: Quality Gate (Install + Scan + Test)  →  Job 2: Build iOS
 #
 # Note: CodeQL runs independently via codeql.yml
 #       Secret scanning is handled by GitHub's native secret scanning
@@ -16,28 +15,38 @@
 name: iOS CI - RegionalApp
 
 on:
-  pull_request:
-    branches: [main, sit]
+  # ---------------------------------------------------------------------------
+  # Auto-trigger: On push to main (after PR merge) — triggers CD pipeline
+  # ---------------------------------------------------------------------------
+  push:
+    branches: [main]
     paths:
       - 'ios/**'
       - 'src/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/ios-ci.yml'
+
+  # ---------------------------------------------------------------------------
+  # Validation: On PR to main (CI checks only, does NOT trigger CD)
+  # ---------------------------------------------------------------------------
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/ios-ci.yml'
+
+  # ---------------------------------------------------------------------------
+  # Manual trigger
+  # ---------------------------------------------------------------------------
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Target environment'
-        required: true
-        type: choice
-        options:
-          - SIT
-          - Staging
-          - Production
-        default: 'SIT'
 
 permissions:
   contents: read          # Allows workflow to clone repository
+  security-events: write  # Allows uploading Trivy SARIF results
 
 # ---------------------------------------------------------------------------
 # Environment variables
@@ -47,24 +56,23 @@ env:
   RUBY_VERSION: '3.2'
   XCODE_WORKSPACE: 'ios/RegionalApp.xcworkspace'
   XCODE_PROJECT: 'ios/RegionalApp.xcodeproj'
-  ENVIRONMENT: ${{ github.event.inputs.environment || 'SIT' }}
 
 # ---------------------------------------------------------------------------
 # Concurrency - cancel in-progress runs for the same branch/environment
 # ---------------------------------------------------------------------------
 concurrency:
-  group: ios-ci-${{ github.ref }}-${{ github.event.inputs.environment || 'SIT' }}
+  group: ios-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ===========================================================================
-  # Job 1: Install - Setup environment and install dependencies
+  # Job 1: Quality Gate - Install, Scan, Lint, and Test in a single job
   # ===========================================================================
-  install:
-    name: Install Dependencies
+  quality-gate:
+    name: Quality Gate (Install + Scan + Test)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     outputs:
       APP_VERSION_NAME: ${{ steps.app_version.outputs.APP_VERSION_NAME }}
       APP_VERSION_CODE: ${{ steps.app_version.outputs.APP_VERSION_CODE }}
@@ -89,7 +97,7 @@ jobs:
       # Step 3: Install npm dependencies
       # -----------------------------------------------------------------------
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # -----------------------------------------------------------------------
       # Step 4: Cache node_modules for downstream jobs
@@ -120,102 +128,36 @@ jobs:
 
           echo "📱 App Version: $APP_VERSION_NAME ($APP_VERSION_CODE)"
 
-  # ===========================================================================
-  # Job 2: Scan - Security audit and Lint
-  # ===========================================================================
-  scan:
-    name: Security Audit & Lint
-    runs-on: macos-latest
-    needs: install
-    timeout-minutes: 10
-
-    steps:
       # -----------------------------------------------------------------------
-      # Step 1: Checkout repository
-      # -----------------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # -----------------------------------------------------------------------
-      # Step 2: Setup Node.js
-      # -----------------------------------------------------------------------
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      # -----------------------------------------------------------------------
-      # Step 3: Restore node_modules cache
-      # -----------------------------------------------------------------------
-      - name: Restore node_modules cache
-        uses: actions/cache/restore@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
-      # -----------------------------------------------------------------------
-      # Step 4: Security audit
+      # Step 6: Security audit
       # -----------------------------------------------------------------------
       - name: Security audit
         run: npm audit --audit-level=moderate || true
         continue-on-error: true
 
       # -----------------------------------------------------------------------
-      # Step 5: Lint (ESLint)
+      # Step 7: Lint (ESLint)
       # -----------------------------------------------------------------------
       - name: Lint
         run: npm run lint
 
-  # ===========================================================================
-  # Job 3: Test - Unit tests
-  # ===========================================================================
-  test:
-    name: Unit Tests
-    runs-on: macos-latest
-    needs: install
-    timeout-minutes: 30
-
-    steps:
       # -----------------------------------------------------------------------
-      # Step 1: Checkout repository
-      # -----------------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # -----------------------------------------------------------------------
-      # Step 2: Setup Node.js
-      # -----------------------------------------------------------------------
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      # -----------------------------------------------------------------------
-      # Step 3: Restore node_modules cache
-      # -----------------------------------------------------------------------
-      - name: Restore node_modules cache
-        uses: actions/cache/restore@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
-      # -----------------------------------------------------------------------
-      # Step 4: Run unit tests
+      # Step 8: Run unit tests
       # -----------------------------------------------------------------------
       - name: Run unit tests
         run: npm test
 
   # ===========================================================================
-  # Job 4: Build iOS - Build, sign, and upload artifacts
+  # Job 2: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build iOS (${{ github.event.inputs.environment || 'SIT' }})
+    name: Build iOS (Release)
     runs-on: macos-latest
-    needs: [install, scan, test]
+    needs: quality-gate
     timeout-minutes: 60
     env:
-      APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}
-      APP_VERSION_CODE: ${{ needs.install.outputs.APP_VERSION_CODE }}
+      APP_VERSION_NAME: ${{ needs.quality-gate.outputs.APP_VERSION_NAME }}
+      APP_VERSION_CODE: ${{ needs.quality-gate.outputs.APP_VERSION_CODE }}
 
     steps:
       # -----------------------------------------------------------------------
@@ -259,10 +201,9 @@ jobs:
           cd ios && pod install
 
       # -----------------------------------------------------------------------
-      # Step 6: Install iOS certificate (Staging/Production only)
+      # Step 6: Install iOS certificate
       # -----------------------------------------------------------------------
       - name: Install iOS certificate
-        if: env.ENVIRONMENT != 'SIT'
         run: |
           # Decode certificate from base64
           echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
@@ -270,10 +211,9 @@ jobs:
           echo "✅ iOS certificate decoded successfully"
 
       # -----------------------------------------------------------------------
-      # Step 7: Install provisioning profile (Staging/Production only)
+      # Step 7: Install provisioning profile
       # -----------------------------------------------------------------------
       - name: Install provisioning profile
-        if: env.ENVIRONMENT != 'SIT'
         run: |
           # Decode provisioning profile from base64
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
@@ -282,10 +222,9 @@ jobs:
           echo "✅ Provisioning profile installed"
 
       # -----------------------------------------------------------------------
-      # Step 8: Create temporary Xcode keychain (Staging/Production only)
+      # Step 8: Create temporary Xcode keychain
       # -----------------------------------------------------------------------
       - name: Create Xcode keychain
-        if: env.ENVIRONMENT != 'SIT'
         run: |
           # Create a temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
@@ -302,45 +241,21 @@ jobs:
           echo "✅ Keychain created and certificate imported"
 
       # -----------------------------------------------------------------------
-      # Step 9: Build iOS app
+      # Step 9: Build iOS app (Release)
       # -----------------------------------------------------------------------
-      - name: Build iOS app (${{ env.ENVIRONMENT }})
+      - name: Build iOS app (Release)
         run: |
-          ENV="${{ env.ENVIRONMENT }}"
-
-          if [ "$ENV" = "SIT" ]; then
-            npm run build:ios:debug:sit:development || \
-            xcodebuild build \
-              -workspace ${{ env.XCODE_WORKSPACE }} \
-              -scheme RegionalApp-Dev \
-              -configuration Debug \
-              -destination 'generic/platform=iOS' \
-              CODE_SIGNING_ALLOWED=NO
-
-          elif [ "$ENV" = "Staging" ]; then
-            npm run build:ios:release:staging:adhoc || \
-            xcodebuild archive \
-              -workspace ${{ env.XCODE_WORKSPACE }} \
-              -scheme RegionalApp-Staging \
-              -configuration Release \
-              -archivePath ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive \
-              CODE_SIGNING_ALLOWED=YES
-
-          elif [ "$ENV" = "Production" ]; then
-            npm run build:ios:release:staging:appstore || \
-            xcodebuild archive \
-              -workspace ${{ env.XCODE_WORKSPACE }} \
-              -scheme RegionalApp \
-              -configuration Release \
-              -archivePath ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive \
-              CODE_SIGNING_ALLOWED=YES
-          fi
+          xcodebuild archive \
+            -workspace ${{ env.XCODE_WORKSPACE }} \
+            -scheme RegionalApp \
+            -configuration Release \
+            -archivePath ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive \
+            CODE_SIGNING_ALLOWED=YES
 
       # -----------------------------------------------------------------------
       # Step 10: Zip .xcarchive file
       # -----------------------------------------------------------------------
       - name: Zip XCArchive file
-        if: env.ENVIRONMENT != 'SIT'
         run: |
           cd ios/build
           ARCHIVE_NAME="RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
@@ -348,13 +263,32 @@ jobs:
           echo "✅ Zipped: ${ARCHIVE_NAME}.zip"
 
       # -----------------------------------------------------------------------
-      # Step 11: Upload .xcarchive artifact
+      # Step 11: Trivy vulnerability scan
+      # -----------------------------------------------------------------------
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy-ios'
+
+      # -----------------------------------------------------------------------
+      # Step 12: Upload .xcarchive artifact
       # -----------------------------------------------------------------------
       - name: Upload iOS XCArchive artifact
-        if: env.ENVIRONMENT != 'SIT'
         uses: actions/upload-artifact@v4
         with:
-          name: ios-${{ env.ENVIRONMENT }}-xcarchive-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: ios-release-xcarchive-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
           path: ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive.zip
           if-no-files-found: error
 
@@ -362,10 +296,9 @@ jobs:
       # Step 12: Upload .ipa artifact
       # -----------------------------------------------------------------------
       - name: Upload iOS IPA artifact
-        if: env.ENVIRONMENT != 'SIT'
         uses: actions/upload-artifact@v4
         with:
-          name: ios-${{ env.ENVIRONMENT }}-ipa-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})
+          name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ github.sha }}
           path: ios/build/ipa/RegionalApp-*.ipa
           if-no-files-found: error
 
@@ -380,7 +313,7 @@ jobs:
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **App** | RegionalApp (iOS) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | Release |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY

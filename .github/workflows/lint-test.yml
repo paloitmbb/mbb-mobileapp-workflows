@@ -1,0 +1,78 @@
+# ──────────────────────────────────────────────────────────────
+# Phase 1: Lint & Test
+# Fast feedback on every push / PR — ESLint + Jest + npm audit
+# ──────────────────────────────────────────────────────────────
+name: "Phase 1 – Lint & Test"
+
+on:
+  push:
+    branches: [main, develop, "release/*"]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: lint-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Node.js ─────────────────────────────────────
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # ── 3. Install dependencies ──────────────────────────────
+      - name: Install dependencies
+        run: npm ci
+
+      # ── 4. npm audit ─────────────────────────────────────────
+      - name: Security audit (npm)
+        run: npm audit --audit-level=moderate
+        continue-on-error: true # advisory — don't block for now
+
+      # ── 5. License compliance ────────────────────────────────
+      - name: License compliance check
+        run: npx license-checker --onlyAllow 'MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;Unlicense;CC0-1.0;CC-BY-3.0;CC-BY-4.0;Python-2.0;BlueOak-1.0.0'
+        continue-on-error: true
+
+      # ── 6. ESLint ────────────────────────────────────────────
+      - name: Run ESLint
+        run: npm run lint
+
+      # ── 7. Jest unit tests with coverage ─────────────────────
+      - name: Run Jest tests
+        run: npm test
+
+      # ── 8. Upload coverage report ───────────────────────────
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage/
+          retention-days: 14
+
+      # ── 9. Job summary ──────────────────────────────────────
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Phase 1 — Lint & Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Actor** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Node.js** | 20 |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

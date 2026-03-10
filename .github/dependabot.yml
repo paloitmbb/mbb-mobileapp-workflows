@@ -1,70 +1,46 @@
 # =============================================================================
 # Dependabot Configuration — MBB Mobile App (React Native)
 # =============================================================================
-# Automated dependency updates — runs weekly on Monday.
-# Covers: npm, GitHub Actions, Gradle (Android), CocoaPods (iOS).
-# PRs appear under the "dependabot" label for easy filtering.
+# Security-only mode: Dependabot will NOT open version update PRs.
+# It will still create PRs for known security vulnerabilities (CVEs).
+# Covers: npm, GitHub Actions, Gradle (Android).
 # =============================================================================
 
 version: 2
 
 updates:
   # ---------------------------------------------------------------------------
-  # npm (JavaScript / TypeScript dependencies)
+  # npm (JavaScript / TypeScript dependencies) — security alerts only
   # ---------------------------------------------------------------------------
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "UTC"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
-      - "npm"
-    commit-message:
-      prefix: "chore(deps)"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+      - "security"
 
   # ---------------------------------------------------------------------------
-  # GitHub Actions (workflow action versions)
+  # GitHub Actions (workflow action versions) — security alerts only
   # ---------------------------------------------------------------------------
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "UTC"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
-      - "github-actions"
-    commit-message:
-      prefix: "ci(deps)"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+      - "security"
 
   # ---------------------------------------------------------------------------
-  # Gradle (Android dependencies)
+  # Gradle (Android dependencies) — security alerts only
   # ---------------------------------------------------------------------------
   - package-ecosystem: "gradle"
     directory: "/android"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "UTC"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
-      - "android"
-    commit-message:
-      prefix: "chore(deps-android)"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+      - "security"

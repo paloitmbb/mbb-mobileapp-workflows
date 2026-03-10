@@ -1,0 +1,400 @@
+# =============================================================================
+# MBB Mobile App - iOS CD Workflow (React Native)
+# =============================================================================
+# This workflow deploys the iOS RegionalApp to App Store Connect / TestFlight.
+# It downloads the SAME release artifacts built by the iOS CI pipeline
+# and promotes them through 3 environments:
+#
+#   SIT (auto) → UAT (approval required) → Production (approval required)
+#
+# Trigger:
+#   - Automatic: When iOS CI succeeds on the main branch
+#   - Manual: workflow_dispatch (re-deploy or ad-hoc)
+#
+# Build Once, Deploy Many:
+#   All 3 environments use the SAME CI artifacts (matched by SHA).
+#   No rebuilding occurs in CD.
+#
+# Approval Gates:
+#   UAT and Production require approval via GitHub Environment Protection Rules.
+#   Configure in: Settings → Environments → ios-UAT / ios-Production
+#
+# Required Secrets:
+#   - APP_STORE_CONNECT_API_KEY_ID        (App Store Connect API Key ID)
+#   - APP_STORE_CONNECT_API_ISSUER_ID     (App Store Connect API Issuer ID)
+#   - APP_STORE_CONNECT_API_KEY_BASE64    (App Store Connect API Key .p8 file, base64-encoded)
+# =============================================================================
+
+name: iOS CD - RegionalApp
+
+on:
+  # ---------------------------------------------------------------------------
+  # Auto-trigger: When iOS CI succeeds on main branch
+  # ---------------------------------------------------------------------------
+  workflow_run:
+    workflows: ["iOS CI - RegionalApp"]
+    types: [completed]
+    branches: [main]
+
+  # ---------------------------------------------------------------------------
+  # Manual trigger: Re-deploy or ad-hoc deployment
+  # ---------------------------------------------------------------------------
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: 'CI workflow run ID to download artifacts from'
+        required: true
+        type: string
+      app_version_name:
+        description: 'App version name (e.g. 1.0.0) — must match the CI build'
+        required: true
+        type: string
+        default: '1.0.0'
+      app_version_code:
+        description: 'App version code / build number (e.g. 1) — must match the CI build'
+        required: true
+        type: string
+        default: '1'
+      commit_sha:
+        description: 'Full commit SHA from the CI build — must match the CI artifact tag'
+        required: true
+        type: string
+      release_notes:
+        description: 'Release notes for TestFlight / App Store'
+        required: false
+        type: string
+        default: 'Bug fixes and performance improvements'
+
+permissions:
+  contents: write         # For creating GitHub Releases
+  actions: read           # For downloading artifacts from CI runs
+
+# ---------------------------------------------------------------------------
+# Concurrency - only one CD pipeline at a time
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ios-cd
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # Pre-flight: Resolve CI build metadata
+  # ===========================================================================
+  resolve:
+    name: Resolve CI Build Info
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      ci_run_id: ${{ steps.resolve.outputs.ci_run_id }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      app_version_name: ${{ steps.resolve.outputs.app_version_name }}
+      app_version_code: ${{ steps.resolve.outputs.app_version_code }}
+      release_notes: ${{ steps.resolve.outputs.release_notes }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve build metadata
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
+            echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
+            echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
+            echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
+          else
+            # Auto-triggered from CI — extract from workflow_run event
+            echo "ci_run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+
+            # Extract version from package.json
+            APP_VERSION_NAME=$(node -p "require('./package.json').version" 2>/dev/null || echo "1.0.0")
+            echo "app_version_name=$APP_VERSION_NAME" >> $GITHUB_OUTPUT
+            echo "app_version_code=1" >> $GITHUB_OUTPUT
+            echo "release_notes=Bug fixes and performance improvements" >> $GITHUB_OUTPUT
+          fi
+
+          echo "📋 Resolved build info:"
+          cat $GITHUB_OUTPUT
+
+  # ===========================================================================
+  # Stage 1: Deploy to SIT (automatic — no approval needed)
+  # ===========================================================================
+  deploy-sit:
+    name: Deploy to SIT (TestFlight Internal)
+    runs-on: macos-latest
+    needs: resolve
+    timeout-minutes: 30
+    environment:
+      name: ios-SIT
+      url: https://appstoreconnect.apple.com
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
+      APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download IPA artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/ipa
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        run: |
+          echo "📦 Downloaded artifacts for SIT:"
+          find artifacts -type f -name "*.ipa" | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Setup App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+
+      - name: Validate IPA
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "❌ No IPA file found!"
+            exit 1
+          fi
+          echo "🔍 Validating: $IPA_PATH"
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+      - name: Upload IPA to TestFlight (SIT)
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+          echo "🚀 Uploading: $IPA_PATH"
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+      - name: SIT deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 iOS SIT Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | SIT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Channel** | TestFlight (Internal) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+
+  # ===========================================================================
+  # Stage 2: Deploy to UAT (requires approval)
+  # ===========================================================================
+  deploy-uat:
+    name: Deploy to UAT (TestFlight External)
+    runs-on: macos-latest
+    needs: [resolve, deploy-sit]
+    timeout-minutes: 30
+    environment:
+      name: ios-UAT
+      url: https://appstoreconnect.apple.com
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
+      APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download IPA artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/ipa
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        run: |
+          echo "📦 Downloaded artifacts for UAT:"
+          find artifacts -type f -name "*.ipa" | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Setup App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+
+      - name: Validate IPA
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "❌ No IPA file found!"
+            exit 1
+          fi
+          echo "🔍 Validating: $IPA_PATH"
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+      - name: Upload IPA to TestFlight (UAT)
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+          echo "🚀 Uploading: $IPA_PATH"
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+      - name: UAT deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 iOS UAT Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | UAT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Channel** | TestFlight (External) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+
+  # ===========================================================================
+  # Stage 3: Deploy to Production (requires approval)
+  # ===========================================================================
+  deploy-production:
+    name: Deploy to Production (App Store)
+    runs-on: macos-latest
+    needs: [resolve, deploy-uat]
+    timeout-minutes: 30
+    environment:
+      name: ios-Production
+      url: https://appstoreconnect.apple.com
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
+      APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download IPA artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-ipa-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/ipa
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download xcarchive artifact from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-xcarchive-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
+          path: artifacts/xcarchive
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        run: |
+          echo "📦 Downloaded artifacts for Production:"
+          find artifacts -type f \( -name "*.ipa" -o -name "*.zip" \) | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Setup App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+
+      - name: Validate IPA
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "❌ No IPA file found!"
+            exit 1
+          fi
+          echo "🔍 Validating: $IPA_PATH"
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+      - name: Upload IPA to App Store Connect (Production)
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" -type f | head -1)
+          echo "🚀 Uploading: $IPA_PATH"
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}" \
+            --type ios
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-v${{ env.APP_VERSION_NAME }}-${{ env.APP_VERSION_CODE }}
+          name: "iOS v${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }})"
+          body: |
+            ## iOS Release v${{ env.APP_VERSION_NAME }}
+
+            **Build:** ${{ env.APP_VERSION_CODE }}
+            **Commit:** ${{ env.COMMIT_SHA }}
+
+            ### Promotion Path
+            SIT ✅ → UAT ✅ → Production ✅
+
+            ### Release Notes
+            ${{ needs.resolve.outputs.release_notes }}
+          files: |
+            artifacts/ipa/*.ipa
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Production deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 iOS Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | Production |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Channel** | App Store |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GitHub Release** | ios-v${{ env.APP_VERSION_NAME }}-${{ env.APP_VERSION_CODE }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
