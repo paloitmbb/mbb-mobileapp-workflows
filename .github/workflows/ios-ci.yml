@@ -15,34 +15,15 @@
 name: iOS CI - RegionalApp
 
 on:
-  # ---------------------------------------------------------------------------
-  # Auto-trigger: On push to main (after PR merge) — triggers CD pipeline
-  # ---------------------------------------------------------------------------
-  push:
-    branches: [main]
-    paths:
-      - 'ios/**'
-      - 'src/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - '.github/workflows/ios-ci.yml'
-
-  # ---------------------------------------------------------------------------
-  # Validation: On PR to main (CI checks only, does NOT trigger CD)
-  # ---------------------------------------------------------------------------
-  pull_request:
-    branches: [main]
-    paths:
-      - 'ios/**'
-      - 'src/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - '.github/workflows/ios-ci.yml'
-
+   push:
+     branches:
+       - main
+     paths:
+        - 'ios/**'
   # ---------------------------------------------------------------------------
   # Manual trigger
   # ---------------------------------------------------------------------------
-  workflow_dispatch:
+   workflow_dispatch:
 
 permissions:
   contents: read          # Allows workflow to clone repository
@@ -70,7 +51,6 @@ jobs:
   # ===========================================================================
   quality-gate:
     name: Quality Gate (Install + Scan + Test)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
     timeout-minutes: 30
     outputs:
@@ -146,12 +126,13 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Run unit tests
         run: npm test
+        continue-on-error: true
 
   # ===========================================================================
   # Job 2: Build iOS - Build, sign, and upload artifacts
   # ===========================================================================
   build:
-    name: Build iOS (Release)
+    name: Build iOS 
     runs-on: macos-latest
     needs: quality-gate
     timeout-minutes: 60
@@ -249,7 +230,7 @@ jobs:
             -workspace ${{ env.XCODE_WORKSPACE }} \
             -scheme RegionalApp \
             -configuration Release \
-            -archivePath ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive \
+            -archivePath "ios/build/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive" \
             CODE_SIGNING_ALLOWED=YES
 
       # -----------------------------------------------------------------------

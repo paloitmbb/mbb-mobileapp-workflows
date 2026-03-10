@@ -81,9 +81,6 @@ jobs:
   resolve:
     name: Resolve CI Build Info
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     outputs:
       ci_run_id: ${{ steps.resolve.outputs.ci_run_id }}
       commit_sha: ${{ steps.resolve.outputs.commit_sha }}
@@ -98,24 +95,11 @@ jobs:
       - name: Resolve build metadata
         id: resolve
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
-            echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
-            echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
-            echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
-            echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
-          else
-            # Auto-triggered from CI — extract from workflow_run event
-            echo "ci_run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
-            echo "commit_sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
-
-            # Extract version from build.gradle
-            APP_VERSION_NAME=$(grep -oP 'versionName\s+"\K[^"]+' android/app/build.gradle || echo "1.0.0")
-            APP_VERSION_CODE=$(grep -oP 'versionCode\s+\K\d+' android/app/build.gradle || echo "1")
-            echo "app_version_name=$APP_VERSION_NAME" >> $GITHUB_OUTPUT
-            echo "app_version_code=$APP_VERSION_CODE" >> $GITHUB_OUTPUT
-            echo "release_notes=Bug fixes and performance improvements" >> $GITHUB_OUTPUT
-          fi
+          echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
+          echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
+          echo "app_version_name=${{ github.event.inputs.app_version_name }}" >> $GITHUB_OUTPUT
+          echo "app_version_code=${{ github.event.inputs.app_version_code }}" >> $GITHUB_OUTPUT
+          echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
 
           echo "📋 Resolved build info:"
           cat $GITHUB_OUTPUT
@@ -198,7 +182,7 @@ jobs:
   deploy-uat:
     name: Deploy to UAT (Closed Testing)
     runs-on: ubuntu-latest
-    needs: [resolve, deploy-sit]
+    needs: [resolve, deploy-sit]                                                                                                                                                                                                                                                                                                       
     timeout-minutes: 30
     environment:
       name: android-UAT
