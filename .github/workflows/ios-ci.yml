@@ -188,10 +188,11 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
-          bundler-cache: true
 
       - name: Install CocoaPods
-        run: cd ios && pod install
+        run: |
+          gem install cocoapods
+          cd ios && pod install
 
       - name: Run Xcode static analysis
         run: |
@@ -268,10 +269,11 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
-          bundler-cache: true
 
       - name: Install CocoaPods
-        run: cd ios && pod install
+        run: |
+          gem install cocoapods
+          cd ios && pod install
 
       - name: Run iOS unit tests
         run: |
@@ -377,7 +379,7 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
-          bundler-cache: true
+
       # -----------------------------------------------------------------------
       # Step 5: Cache CocoaPods
       # -----------------------------------------------------------------------
@@ -492,7 +494,7 @@ jobs:
       #     ARCHIVE_PATH="$RUNNER_TEMP/RegionalApp-${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }}).xcarchive"
       #
       #     xcodebuild archive \
-      #       -workspace ${{ env.XCODE_WORKSPACE }} \
+      #       -workspace ${{ env.XCODE_WORKSPACE }} \ 
       #       -scheme ${{ env.XCODE_SCHEME }} \
       #       -configuration Release \
       #       -archivePath "$ARCHIVE_PATH" \
