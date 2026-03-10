@@ -238,28 +238,43 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # Job 2d: iOS Unit Tests (optional - no test target exists yet)
+  # Job 2d: iOS Unit Tests (skipped if no test targets exist)
   # ============================================================
   test-ios:
     name: iOS Unit Tests (xcodebuild)
     runs-on: macos-latest        # ← must be macOS for Xcode
     needs: install
     timeout-minutes: 30
-    continue-on-error: true       # ← make optional until tests are added
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check for test targets
+        id: check-tests
+        run: |
+          # Check if scheme has test targets defined
+          SCHEME_FILE="ios/MyTestApp.xcodeproj/xcshareddata/xcschemes/MyTestApp.xcscheme"
+          if grep -q "BuildableName.*\.xctest" "$SCHEME_FILE" 2>/dev/null; then
+            echo "has_tests=true" >> $GITHUB_OUTPUT
+            echo "✅ Test targets found in scheme"
+          else
+            echo "has_tests=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No test targets found — skipping iOS unit tests"
+          fi
+
       - uses: actions/setup-node@v4
+        if: steps.check-tests.outputs.has_tests == 'true'
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Restore node_modules cache
+        if: steps.check-tests.outputs.has_tests == 'true'
         uses: actions/cache/restore@v4
         with:
           path: node_modules
           key: node-modules-macOS-${{ hashFiles('package-lock.json') }}
 
       - name: Cache CocoaPods
+        if: steps.check-tests.outputs.has_tests == 'true'
         uses: actions/cache@v4
         with:
           path: ios/Pods
@@ -267,16 +282,19 @@ jobs:
           restore-keys: pods-macOS-
 
       - name: Setup Ruby
+        if: steps.check-tests.outputs.has_tests == 'true'
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
 
       - name: Install CocoaPods
+        if: steps.check-tests.outputs.has_tests == 'true'
         run: |
           gem install cocoapods
           cd ios && pod install
 
       - name: Run iOS unit tests
+        if: steps.check-tests.outputs.has_tests == 'true'
         run: |
           xcodebuild test \
             -workspace ${{ env.XCODE_WORKSPACE }} \
@@ -289,7 +307,7 @@ jobs:
 
       - name: Upload iOS test results
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.check-tests.outputs.has_tests == 'true'
         with:
           name: ios-test-results-${{ github.sha }}
           path: ${{ runner.temp }}/TestResults.xcresult
@@ -343,7 +361,7 @@ jobs:
   build:
     name: Build iOS (Debug)
     runs-on: macos-latest
-    needs: [install, lint-js, lint-ios, test-js]  # ← test-ios removed until test target exists
+    needs: [install, lint-js, lint-ios, test-ios, test-js]  # ← waits for all quality gate jobs
     timeout-minutes: 60
     env:
       APP_VERSION_NAME: ${{ needs.install.outputs.APP_VERSION_NAME }}
