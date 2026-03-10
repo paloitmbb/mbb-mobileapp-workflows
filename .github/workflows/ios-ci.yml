@@ -238,7 +238,7 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # Job 2d: iOS Unit Tests (skipped if no test targets exist)
+  # Job 2d: iOS Unit Tests
   # ============================================================
   test-ios:
     name: iOS Unit Tests (xcodebuild)
