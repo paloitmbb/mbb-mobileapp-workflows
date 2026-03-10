@@ -383,13 +383,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       # -----------------------------------------------------------------------
-      # Step 3: Restore node_modules cache
+      # Step 3: Restore node_modules cache (with fallback npm ci)
       # -----------------------------------------------------------------------
       - name: Restore node_modules cache
+        id: cache-node-modules
         uses: actions/cache/restore@v4
         with:
           path: node_modules
           key: node-modules-macOS-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies if cache miss
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci
 
       # -----------------------------------------------------------------------
       # Step 4: Setup Ruby (for CocoaPods)
@@ -415,7 +420,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Install CocoaPods
         run: |
-          gem install cocoapods
+          gem install cocoapods xcpretty
           cd ios && pod install
 
       # -----------------------------------------------------------------------
@@ -492,6 +497,13 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Build iOS app (Debug)
         run: |
+          echo "📱 Building iOS app..."
+          echo "Workspace: ${{ env.XCODE_WORKSPACE }}"
+          echo "Scheme: ${{ env.XCODE_SCHEME }}"
+          
+          # List available schemes to verify
+          xcodebuild -workspace ${{ env.XCODE_WORKSPACE }} -list
+          
           xcodebuild build \
             -workspace ${{ env.XCODE_WORKSPACE }} \
             -scheme ${{ env.XCODE_SCHEME }} \
@@ -499,7 +511,19 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath $RUNNER_TEMP/DerivedData \
             -parallelizeTargets \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty --color --report junit --output $RUNNER_TEMP/build-results.xml || {
+              echo "❌ Build failed. Showing last 100 lines of raw output:"
+              xcodebuild build \
+                -workspace ${{ env.XCODE_WORKSPACE }} \
+                -scheme ${{ env.XCODE_SCHEME }} \
+                -configuration Debug \
+                -destination 'generic/platform=iOS Simulator' \
+                -derivedDataPath $RUNNER_TEMP/DerivedData \
+                -parallelizeTargets \
+                CODE_SIGNING_ALLOWED=NO 2>&1 | tail -100
+              exit 1
+            }
 
           echo "✅ Debug build complete"
 
