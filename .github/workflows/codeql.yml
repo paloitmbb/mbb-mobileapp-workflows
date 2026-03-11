@@ -1,19 +1,18 @@
 # =============================================================================
-# CodeQL Analysis — {{REPO_NAME}} (React Native)
+# CodeQL Analysis — React Native
 # =============================================================================
 # SAST via GitHub CodeQL — runs on every PR, every push to main/sit,
 # and on a weekly schedule. Results surface in:
 #   GitHub → Security → Code scanning
 #
-# Language: javascript-typescript  (covers .js, .mjs, .cjs, .ts, .tsx, .jsx)
-# Coverage: security-extended queries  →  OWASP Top 10 + CWE beyond defaults
-#           security-and-quality queries  →  maintainability + reliability
-#
-# Note: JavaScript/TypeScript are interpreted — no build step is required.
-#       CodeQL analyses the source directly.
+# Languages: javascript-typescript  (covers .js, .mjs, .cjs, .ts, .tsx, .jsx)
+#            java-kotlin            (covers Android .java and .kt source)
+#            swift                  (covers iOS .swift and .m source)
+# Note: JavaScript/TypeScript are interpreted — no build step required.
+#       Java/Kotlin and Swift are compiled — build steps required.
+#       Swift analysis requires macos-latest runner.
 # =============================================================================
-#dummy comment to trigger workflow run
-name: CodeQL Analysis
+name: CodeQL Analysis 
 
 on:
   pull_request:
@@ -42,23 +41,33 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
 
     strategy:
       fail-fast: false # keep analyzing remaining languages if one fails
       matrix:
         language:
           - javascript-typescript
+          - java-kotlin
+          - swift
+
+        include:
+          - language: swift
+            runner: macos-latest    # ← Swift must run on macOS
+          - language: javascript-typescript
+            runner: ubuntu-latest   # ← JS can run on Linux (cheaper)
+          - language: java-kotlin
+            runner: ubuntu-latest 
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
       # Initialize CodeQL database and inject security query suites.
       # No explicit build step needed for JavaScript / TypeScript —
       # CodeQL performs its own extraction pass over the source files.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3.32.5
+        uses: github/codeql-action/init@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.32.5
         with:
           languages: ${{ matrix.language }}
           # security-extended — XSS, injection, prototype pollution, SSRF,
@@ -66,8 +75,67 @@ jobs:
           # security-and-quality — adds code health: dead code, unused vars.
           queries: security-extended,security-and-quality
 
+      # -----------------------------------------------------------------------
+      # Build step required for java-kotlin language only
+      # JS/TS skips this automatically (CodeQL detects no build needed)
+      # -----------------------------------------------------------------------
+      - name: Setup Java (for java-kotlin analysis)
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  #v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Node.js (React Native JS bundle needed for Android build)
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        if: matrix.language == 'java-kotlin'
+        run: npm ci
+
+      - name: Build Android for CodeQL
+        if: matrix.language == 'java-kotlin'
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          chmod +x android/gradlew
+          cd android && ./gradlew assembleDebug \
+            --no-daemon \
+            -x lint \
+            -x test
+
+      # -----------------------------------------------------------------------
+      # Build steps required for swift language only
+      # Runs on macos-latest — handled by matrix.runner override
+      # CodeQL traces the Xcode build to understand Swift/ObjC source
+      # -----------------------------------------------------------------------
+      - name: Setup Ruby (for CocoaPods)
+        if: matrix.language == 'swift'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install CocoaPods
+        if: matrix.language == 'swift'
+        run: |
+          gem install cocoapods
+          cd ios && pod install
+
+      - name: Build iOS for CodeQL
+        if: matrix.language == 'swift'
+        run: |
+          xcodebuild build \
+            -workspace ios/MyTestApp.xcworkspace \
+            -scheme MyTestApp \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3.32.5
+        uses: github/codeql-action/analyze@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.32.5
         with:
           category: "/language:${{ matrix.language }}"
           # Emit SARIF locally so the artifact step below can capture it.
@@ -89,6 +157,11 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write    # Post Dependency Review comments
+      contents: read          # Allows workflow to clone repository
+      actions: read           # Required by Dependency Review Action
+    timeout-minutes: 15
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
@@ -103,4 +176,5 @@ jobs:
           # Always post a summary table to the PR for visibility.
           comment-summary-in-pr: always
           warn-only: false
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0
 
