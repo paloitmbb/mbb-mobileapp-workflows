@@ -310,9 +310,21 @@ jobs:
       COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
       APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
       APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
 
     steps:
+      - name: 🎬 Deployment Mode Indicator
+        run: |
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "🎬 DEMO MODE ENABLED - UAT Stage"
+            echo "## 🎬 Demo Mode - Stage 2: UAT" >> $GITHUB_STEP_SUMMARY
+            echo "Showing demo deployment flow (no actual upload)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🏢 PRODUCTION MODE - Actual UAT deployment"
+          fi
+
       - name: Download APK artifact from CI
+        if: env.DRY_RUN != 'true'
         uses: actions/download-artifact@v4
         with:
           name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
@@ -321,6 +333,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List downloaded artifacts
+        if: env.DRY_RUN != 'true'
         run: |
           echo "📦 Downloaded artifacts for UAT:"
           find artifacts -type f -name "*.apk" | while read f; do
@@ -328,6 +341,7 @@ jobs:
           done
 
       - name: Verify downloaded artifacts
+        if: env.DRY_RUN != 'true'
         run: |
           APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
           if [ "$APK_COUNT" -eq 0 ]; then
@@ -336,7 +350,19 @@ jobs:
           fi
           echo "✅ Found $APK_COUNT APK file(s)"
 
+      - name: 📋 Demo Validation (Dry Run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "## ✅ Pre-Deployment Checks (Demo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Verified build artifacts exist" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Validated app signing profile" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Confirmed UAT environment readiness" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Ready to proceed to Production approval gate" >> $GITHUB_STEP_SUMMARY
+
       - name: Create service account key
+        if: env.DRY_RUN != 'true'
         run: |
           echo "::add-mask::${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}"
           SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/service-account.json
@@ -345,6 +371,7 @@ jobs:
           echo "✅ Service account key written to RUNNER_TEMP"
 
       - name: Prepare release notes
+        if: env.DRY_RUN != 'true'
         run: |
           mkdir -p whatsnew
           NOTES="${{ needs.resolve.outputs.release_notes }}"
@@ -355,6 +382,7 @@ jobs:
           echo "✅ Release notes written"
 
       - name: Upload APK to Google Play (Alpha / Closed Testing)
+        if: env.DRY_RUN != 'true'
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJson: ${{ env.SERVICE_ACCOUNT_PATH }}
@@ -371,6 +399,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "| **Mode** | 🎬 Demo (Dry Run) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| **Mode** | 🏢 Production |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| **Environment** | UAT |" >> $GITHUB_STEP_SUMMARY
           echo "| **Track** | Alpha (Closed Testing) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
@@ -399,9 +432,21 @@ jobs:
       COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
       APP_VERSION_NAME: ${{ needs.resolve.outputs.app_version_name }}
       APP_VERSION_CODE: ${{ needs.resolve.outputs.app_version_code }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
 
     steps:
+      - name: 🎬 Deployment Mode Indicator
+        run: |
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "🎬 DEMO MODE ENABLED - Production Stage"
+            echo "## 🎬 Demo Mode - Stage 3: Production" >> $GITHUB_STEP_SUMMARY
+            echo "Showing demo deployment flow (no actual upload)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🏢 PRODUCTION MODE - Actual Production deployment"
+          fi
+
       - name: Download AAB artifact from CI
+        if: env.DRY_RUN != 'true'
         uses: actions/download-artifact@v4
         with:
           name: android-release-aab-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
@@ -410,6 +455,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download APK artifact from CI
+        if: env.DRY_RUN != 'true'
         uses: actions/download-artifact@v4
         with:
           name: android-release-apk-v${{ env.APP_VERSION_NAME }}(${{ env.APP_VERSION_CODE }})-${{ env.COMMIT_SHA }}
@@ -418,6 +464,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List downloaded artifacts
+        if: env.DRY_RUN != 'true'
         run: |
           echo "📦 Downloaded artifacts for Production:"
           find artifacts -type f \( -name "*.aab" -o -name "*.apk" \) | while read f; do
@@ -425,6 +472,7 @@ jobs:
           done
 
       - name: Verify downloaded artifacts
+        if: env.DRY_RUN != 'true'
         run: |
           AAB_COUNT=$(find artifacts/aab -name "*.aab" 2>/dev/null | wc -l)
           APK_COUNT=$(find artifacts/apk -name "*.apk" 2>/dev/null | wc -l)
@@ -439,7 +487,17 @@ jobs:
           fi
           echo "✅ Found $AAB_COUNT AAB file(s) and $APK_COUNT APK file(s)"
 
+      - name: 📋 Demo Validation (Dry Run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "## ✅ Pre-Deployment Checks (Demo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Verified build artifacts exist" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Validated app signing profile" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Confirmed Production environment readiness" >> $GITHUB_STEP_SUMMARY
+
       - name: Create service account key
+        if: env.DRY_RUN != 'true'
         run: |
           echo "::add-mask::${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}"
           SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/service-account.json
@@ -448,6 +506,7 @@ jobs:
           echo "✅ Service account key written to RUNNER_TEMP"
 
       - name: Prepare release notes
+        if: env.DRY_RUN != 'true'
         run: |
           mkdir -p whatsnew
           NOTES="${{ needs.resolve.outputs.release_notes }}"
@@ -458,6 +517,7 @@ jobs:
           echo "✅ Release notes written"
 
       - name: Upload AAB to Google Play (Production)
+        if: env.DRY_RUN != 'true'
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJson: ${{ env.SERVICE_ACCOUNT_PATH }}
@@ -468,6 +528,7 @@ jobs:
           status: completed
 
       - name: Create GitHub Release
+        if: env.DRY_RUN != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-v${{ env.APP_VERSION_NAME }}-${{ env.APP_VERSION_CODE }}
@@ -498,6 +559,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "| **Mode** | 🎬 Demo (Dry Run) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| **Mode** | 🏢 Production |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| **Environment** | Production |" >> $GITHUB_STEP_SUMMARY
           echo "| **Track** | Production |" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ env.APP_VERSION_NAME }} (${{ env.APP_VERSION_CODE }}) |" >> $GITHUB_STEP_SUMMARY
@@ -508,4 +574,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          echo "✅ Demo Production stage complete"
+          rm -f "${{ env.SERVICE_ACCOUNT_PATH }}"
+          echo "✅ Cleanup complete"

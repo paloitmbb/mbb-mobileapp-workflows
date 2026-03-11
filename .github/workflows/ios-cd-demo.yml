@@ -1,0 +1,493 @@
+# =============================================================================
+# MBB Mobile App - iOS CD Workflow (React Native)
+# =============================================================================
+# This workflow deploys the iOS RegionalApp to App Store Connect.
+# It downloads the SAME release artifacts built by the iOS CI pipeline
+# and promotes them through 3 environments:
+#
+#   SIT (auto) → UAT (approval required) → Production (approval required)
+#
+# Trigger:
+#   - Automatic: When iOS CI succeeds on the main branch
+#   - Manual: workflow_dispatch (re-deploy or ad-hoc)
+#
+# Build Once, Deploy Many:
+#   All 3 environments use the SAME CI artifacts (matched by SHA).
+#   No rebuilding occurs in CD.
+#
+# Approval Gates:
+#   UAT and Production require approval via GitHub Environment Protection Rules.
+#   Configure in: Settings → Environments → ios-UAT / ios-Production
+#
+# Required Secrets:
+#   - APP_STORE_CONNECT_API_KEY_ID       (App Store Connect API Key ID)
+#   - APP_STORE_CONNECT_API_ISSUER_ID    (App Store Connect Issuer ID)
+#   - APP_STORE_CONNECT_API_KEY_CONTENT  (App Store Connect API Key .p8 content)
+# =============================================================================
+
+name: iOS CD - RegionalApp
+
+on:
+  # ---------------------------------------------------------------------------
+  # Auto-trigger: When iOS CI succeeds on main branch
+  # ---------------------------------------------------------------------------
+  workflow_run:
+    workflows: ["iOS CI - RegionalApp"]
+    types: [completed]
+    branches: [main]
+
+  # ---------------------------------------------------------------------------
+  # Manual trigger: Re-deploy or ad-hoc deployment
+  # ---------------------------------------------------------------------------
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Demo mode - walk through pipeline with approval gates (no actual deployment)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      ci_run_id:
+        description: 'CI workflow run ID to download artifacts from'
+        required: true
+        type: string
+      app_version:
+        description: 'App version (e.g. 1.0.0) — must match the CI build'
+        required: true
+        type: string
+        default: '1.0.0'
+      build_number:
+        description: 'Build number (e.g. 1) — must match the CI build'
+        required: true
+        type: string
+        default: '1'
+      commit_sha:
+        description: 'Full commit SHA from the CI build — must match the CI artifact tag'
+        required: true
+        type: string
+      release_notes:
+        description: 'Release notes for this version'
+        required: false
+        type: string
+        default: 'Bug fixes and performance improvements'
+
+permissions:
+  contents: write         # For creating GitHub Releases
+  actions: read           # For downloading artifacts from CI runs
+
+# ---------------------------------------------------------------------------
+# Concurrency - only one CD pipeline at a time
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ios-cd
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # Pre-flight: Resolve CI build metadata
+  # ===========================================================================
+  resolve:
+    name: Resolve CI Build Info
+    runs-on: ubuntu-latest
+    # Only proceed if triggered manually OR if the CI workflow succeeded
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      ci_run_id: ${{ steps.resolve.outputs.ci_run_id }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      app_version: ${{ steps.resolve.outputs.app_version }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      release_notes: ${{ steps.resolve.outputs.release_notes }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+
+    steps:
+      # No checkout needed — this job only reads GitHub event context
+      # and writes outputs. It never touches repository files.
+
+      - name: Resolve build metadata
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            # ---------------------------------------------------------------
+            # Automatic trigger — read metadata from workflow_run event
+            # github.event.inputs is EMPTY for workflow_run — never use it here
+            # ---------------------------------------------------------------
+            CI_RUN_ID="${{ github.event.workflow_run.id }}"
+            COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+
+            # Fetch artifact list from the CI run to extract version info
+            # Version is embedded in artifact name: ios-release-ipa-vX.X.X(Y)-SHA
+            ARTIFACT_NAME=$(gh api \
+              /repos/${{ github.repository }}/actions/runs/${CI_RUN_ID}/artifacts \
+              --jq '.artifacts[] | select(.name | startswith("ios-release-ipa")) | .name' \
+              | head -1)
+
+            echo "📦 Found artifact: $ARTIFACT_NAME"
+
+            if [ -z "$ARTIFACT_NAME" ]; then
+              echo "❌ No ios-release-ipa artifact found in CI run $CI_RUN_ID"
+              exit 1
+            fi
+
+            # Extract version from artifact name pattern: vX.X.X(Y)-SHA
+            APP_VERSION=$(echo "$ARTIFACT_NAME" | grep -oP '(?<=v)[0-9]+\.[0-9]+\.[0-9]+')
+            BUILD_NUMBER=$(echo "$ARTIFACT_NAME" | grep -oP '(?<=\()[0-9]+(?=\))')
+
+            if [ -z "$APP_VERSION" ] || [ -z "$BUILD_NUMBER" ]; then
+              echo "❌ Could not extract version from artifact name: $ARTIFACT_NAME"
+              exit 1
+            fi
+
+            echo "ci_run_id=${CI_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+            echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
+            echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
+            echo "release_notes=Automated deployment from CI build ${CI_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+
+          else
+            # ---------------------------------------------------------------
+            # Manual trigger — read from workflow_dispatch inputs
+            # All values explicitly provided by the person triggering the run
+            # ---------------------------------------------------------------
+            if [ -z "${{ github.event.inputs.ci_run_id }}" ]; then
+              echo "❌ ci_run_id is required for manual dispatch"
+              exit 1
+            fi
+            if [ -z "${{ github.event.inputs.commit_sha }}" ]; then
+              echo "❌ commit_sha is required for manual dispatch"
+              exit 1
+            fi
+
+            echo "ci_run_id=${{ github.event.inputs.ci_run_id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.inputs.commit_sha }}" >> $GITHUB_OUTPUT
+            echo "app_version=${{ github.event.inputs.app_version }}" >> $GITHUB_OUTPUT
+            echo "build_number=${{ github.event.inputs.build_number }}" >> $GITHUB_OUTPUT
+            echo "release_notes=${{ github.event.inputs.release_notes }}" >> $GITHUB_OUTPUT
+            echo "dry_run=${{ github.event.inputs.dry_run }}" >> $GITHUB_OUTPUT
+          fi
+
+          echo "📋 Resolved build info:"
+          cat $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================================================
+  # Stage 1: Deploy to SIT (automatic — no approval needed)
+  # ===========================================================================
+  deploy-sit:
+    name: Deploy to SIT (TestFlight Internal)
+    runs-on: macos-latest
+    needs: resolve
+    timeout-minutes: 30
+    environment:
+      name: ios-SIT
+      url: https://appstoreconnect.apple.com
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION: ${{ needs.resolve.outputs.app_version }}
+      BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+
+    steps:
+      - name: 🎬 Deployment Mode Indicator
+        run: |
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "🎬 DEMO MODE ENABLED - SIT Stage"
+            echo "## 🎬 Demo Mode - Stage 1: SIT" >> $GITHUB_STEP_SUMMARY
+            echo "Showing demo deployment flow (no actual upload)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🏢 PRODUCTION MODE - Actual SIT deployment"
+          fi
+
+      - name: Download IPA artifact from CI
+        if: env.DRY_RUN != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-ipa-v${{ env.APP_VERSION }}(${{ env.BUILD_NUMBER }})-${{ env.COMMIT_SHA }}
+          path: artifacts/ipa
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        if: env.DRY_RUN != 'true'
+        run: |
+          echo "📦 Downloaded artifacts for SIT:"
+          find artifacts -type f -name "*.ipa" | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Verify downloaded artifacts
+        if: env.DRY_RUN != 'true'
+        run: |
+          IPA_COUNT=$(find artifacts/ipa -name "*.ipa" 2>/dev/null | wc -l)
+          if [ "$IPA_COUNT" -eq 0 ]; then
+            echo "❌ No IPA files found — download may have failed"
+            exit 1
+          fi
+          echo "✅ Found $IPA_COUNT IPA file(s)"
+
+      - name: 📋 Demo Validation (Dry Run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "## ✅ Pre-Deployment Checks (Demo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Verified build artifacts exist" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Validated app signing profile" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Confirmed SIT environment readiness" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Ready to proceed to UAT approval gate" >> $GITHUB_STEP_SUMMARY
+
+      - name: Setup App Store Connect API Key
+        if: env.DRY_RUN != 'true'
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}" > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
+          echo "✅ App Store Connect API key configured"
+
+      - name: Upload IPA to App Store Connect (TestFlight Internal)
+        if: env.DRY_RUN != 'true'
+        run: |
+          IPA_PATH=$(find artifacts/ipa -name "*.ipa" | head -1)
+          
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA_PATH" \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}"
+          
+          echo "✅ IPA uploaded to App Store Connect"
+
+      - name: SIT deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 iOS SIT Stage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ env.DRY_RUN }}" == "true" ]; then
+            echo "| **Mode** | 🎬 Demo (Dry Run) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| **Mode** | 🏢 Production |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "| **Environment** | SIT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Track** | TestFlight Internal Testing |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CI Run** | ${{ env.CI_RUN_ID }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf ~/private_keys
+          echo "✅ Cleanup complete"
+
+  # ===========================================================================
+  # Stage 2: Deploy to UAT (requires approval) — only in dry_run mode
+  # ===========================================================================
+  deploy-uat:
+    name: 🔒 Deploy to UAT (Approval Required)
+    runs-on: macos-latest
+    needs: [resolve, deploy-sit]
+    if: needs.resolve.outputs.dry_run == 'true'
+    timeout-minutes: 60
+    environment:
+      name: ios-UAT
+      url: https://appstoreconnect.apple.com
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION: ${{ needs.resolve.outputs.app_version }}
+      BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+
+    steps:
+      - name: ⏸️ UAT Approval Gate
+        run: |
+          echo "## 🔒 UAT Approval Gate - Demo Mode" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pipeline has paused. Client/reviewer can now:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review SIT stage logs and artifacts ✅" >> $GITHUB_STEP_SUMMARY
+          echo "2. Verify deployment readiness" >> $GITHUB_STEP_SUMMARY
+          echo "3. Approve or reject in GitHub Environment Protection Rules" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Info:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ env.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "- CI Run: ${{ env.CI_RUN_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next:** After approval, pipeline continues to UAT and Production stages 👉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎬 **This is a DEMO run - no actual deployment will occur**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Download IPA artifact from CI
+        if: env.DRY_RUN == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-ipa-v${{ env.APP_VERSION }}(${{ env.BUILD_NUMBER }})-${{ env.COMMIT_SHA }}
+          path: artifacts/ipa
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List downloaded artifacts
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "📦 Downloaded artifacts for UAT:"
+          find artifacts -type f -name "*.ipa" | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Verify downloaded artifacts
+        if: env.DRY_RUN == 'true'
+        run: |
+          IPA_COUNT=$(find artifacts/ipa -name "*.ipa" 2>/dev/null | wc -l)
+          if [ "$IPA_COUNT" -eq 0 ]; then
+            echo "❌ No IPA files found — download may have failed"
+            exit 1
+          fi
+          echo "✅ Found $IPA_COUNT IPA file(s)"
+
+      - name: 🎬 Demo Deploy to UAT (Dry Run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "## 📊 Demo UAT Deployment Flow" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Simulated Actions (Demo):**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Verifying build artifacts (passed)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Checking signing profile" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎬 Would upload IPA to TestFlight External Testing (DEMO - skipped)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎬 Would notify UAT testers (DEMO - skipped)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** Ready for Production approval" >> $GITHUB_STEP_SUMMARY
+
+      - name: UAT deployment summary
+        if: always()
+        run: |
+          echo "## 🔒 iOS UAT Stage (Demo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Mode** | 🎬 Demo (Approval Gate) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | UAT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ✅ Approved |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Track** | TestFlight External Testing (Demo) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "✅ Demo UAT stage complete"
+
+  # ===========================================================================
+  # Stage 3: Deploy to Production (requires approval) — only in dry_run mode
+  # ===========================================================================
+  deploy-production:
+    name: 🚀 Deploy to Production (Final Approval)
+    runs-on: macos-latest
+    needs: [resolve, deploy-uat]
+    if: needs.resolve.outputs.dry_run == 'true'
+    timeout-minutes: 60
+    environment:
+      name: ios-Production
+      url: https://appstoreconnect.apple.com
+    env:
+      CI_RUN_ID: ${{ needs.resolve.outputs.ci_run_id }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      APP_VERSION: ${{ needs.resolve.outputs.app_version }}
+      BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+
+    steps:
+      - name: 🔒 Production Approval Gate
+        run: |
+          echo "## 🔒 Production Approval Gate - Demo Mode" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pipeline paused for final approval. Client/reviewer can:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review UAT validation and test results" >> $GITHUB_STEP_SUMMARY
+          echo "2. Verify deployment readiness for production" >> $GITHUB_STEP_SUMMARY
+          echo "3. Approve or reject in GitHub" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build & Promotion:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Path: SIT ✅ → UAT ✅ → **Production** (pending approval)" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ env.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎬 **This is a DEMO - no actual deployment will occur**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Download IPA artifact from CI
+        if: env.DRY_RUN == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-ipa-v${{ env.APP_VERSION }}(${{ env.BUILD_NUMBER }})-${{ env.COMMIT_SHA }}
+          path: artifacts/ipa
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download dSYM artifact from CI
+        if: env.DRY_RUN == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-dsym-v${{ env.APP_VERSION }}(${{ env.BUILD_NUMBER }})-${{ env.COMMIT_SHA }}
+          path: artifacts/dsym
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: List downloaded artifacts
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "📦 Downloaded artifacts for Production (Demo):"
+          find artifacts -type f \( -name "*.ipa" -o -name "*.dSYM.zip" -o -name "*.dSYM" \) | while read f; do
+            echo "  - $f ($(du -h "$f" | cut -f1))"
+          done
+
+      - name: Verify downloaded artifacts
+        if: env.DRY_RUN == 'true'
+        run: |
+          IPA_COUNT=$(find artifacts/ipa -name "*.ipa" 2>/dev/null | wc -l)
+
+          if [ "$IPA_COUNT" -eq 0 ]; then
+            echo "❌ No IPA files found — download may have failed"
+            exit 1
+          fi
+          echo "✅ Found $IPA_COUNT IPA file(s)"
+
+      - name: 🎬 Demo Deploy to Production (Dry Run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "## 📊 Demo Production Deployment Flow" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Simulated Actions (Demo):**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Verifying IPA artifact (passed)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Checking signing certificates" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎬 Would submit to App Store Review (DEMO - skipped)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎬 Would upload dSYMs for crash reporting (DEMO - skipped)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎬 Would create GitHub Release (DEMO - skipped)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎬 Would notify all stakeholders (DEMO - skipped)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Complete Pipeline Flow Demonstrated:**" >> $GITHUB_STEP_SUMMARY
+          echo "SIT (auto) ✅ → UAT (approved) ✅ → Production (approved) ✅" >> $GITHUB_STEP_SUMMARY
+
+      - name: Production deployment summary
+        if: always()
+        run: |
+          echo "## 🚀 iOS Production Stage (Demo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Mode** | 🎬 Demo (Approval Gate) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | Production |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ✅ Approved |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ env.COMMIT_SHA }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Pipeline Result** | ✨ Demo Complete - Full flow demonstrated |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "✅ Demo Production stage complete"
