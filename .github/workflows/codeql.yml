@@ -121,7 +121,7 @@ jobs:
 
       - name: Install CocoaPods
         if: matrix.language == 'swift'
-        run: cd ios && bundle exec pod install
+        run: bundle exec pod install --project-directory=ios
 
       - name: Build iOS for CodeQL
         if: matrix.language == 'swift'
