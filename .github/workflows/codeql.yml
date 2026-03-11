@@ -117,11 +117,12 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.2'
-          bundler-cache: true
 
       - name: Install CocoaPods
         if: matrix.language == 'swift'
-        run: bundle exec pod install --project-directory=ios
+        run: |
+          gem install cocoapods
+          cd ios && pod install
 
       - name: Build iOS for CodeQL
         if: matrix.language == 'swift'
