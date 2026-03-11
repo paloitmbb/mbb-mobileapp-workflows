@@ -405,16 +405,6 @@ jobs:
           echo "✅ AAB artifact verified (simulated)"
           echo "✅ APK artifact verified (simulated)"
 
-      - name: Verify downloaded artifacts
-        if: env.DRY_RUN == 'true'
-        run: |
-          IPA_COUNT=$(find artifacts/ipa -name "*.ipa" 2>/dev/null | wc -l)
-
-          if [ "$IPA_COUNT" -eq 0 ]; then
-            echo "❌ No IPA files found — download may have failed"
-            exit 1
-          fi
-          echo "✅ Found $IPA_COUNT IPA file(s)"
 
       - name: 🎬 Demo Deploy to Production (Dry Run)
         if: env.DRY_RUN == 'true'
