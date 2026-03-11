@@ -17,7 +17,7 @@
 #       Secret scanning is handled by GitHub's native secret scanning
 # =============================================================================
 
-name: iOS CI - RegionalApp
+name: iOS CI 
 
 on:
   push:
