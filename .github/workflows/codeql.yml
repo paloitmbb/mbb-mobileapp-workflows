@@ -121,14 +121,16 @@ jobs:
 
       - name: Install CocoaPods
         if: matrix.language == 'swift'
-        run: cd ios && pod install
+        run: |
+          gem install cocoapods
+          cd ios && pod install
 
       - name: Build iOS for CodeQL
         if: matrix.language == 'swift'
         run: |
           xcodebuild build \
-            -workspace ios/RegionalApp.xcworkspace \
-            -scheme RegionalApp \
+            -workspace ios/MyTestApp.xcworkspace \
+            -scheme MyTestApp \
             -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
