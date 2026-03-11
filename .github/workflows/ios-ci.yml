@@ -45,7 +45,7 @@ permissions:
 # ---------------------------------------------------------------------------
 env:
   NODE_VERSION: '20'
-  RUBY_VERSION: '3.2'
+  RUBY_VERSION: '3.1'
   XCODE_WORKSPACE: 'ios/MyTestApp.xcworkspace'
   XCODE_PROJECT: 'ios/MyTestApp.xcodeproj'
   XCODE_SCHEME: 'MyTestApp'
